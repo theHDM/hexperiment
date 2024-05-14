@@ -1482,7 +1482,7 @@
   /*
     It is more convenient to pre-define the correct
     pulse wave modulation slice and channel associated
-    with the TONE_PIN on this processor (see RP2040
+    with the PIEZO_PIN on this processor (see RP2040
     manual) than to have it looked up each time.
   */
   #define PIEZO_PIN 23
@@ -1656,15 +1656,15 @@
         synth[i].counter += synth[i].increment; // should loop from 65536 -> 0        
         p = synth[i].counter;
         switch (currWave) {
-          case WAVEFORM_SAW:                                                        break;
-          case WAVEFORM_TRIANGLE: p = 2 * ((p >> 15) ? p : (65535 - p));            break;
-          case WAVEFORM_SQUARE:   p = 0 - (p > (32768 - modWheel.curValue * 7));  break;
-          case WAVEFORM_HYBRID:   p = (p < synth[i].A ? p / synth[i].A
-                                    : (p > synth[i].B ? (255 - p) / (255 - synth[i].B)
-                                    : 0 )) * 255;
-          case WAVEFORM_SINE:     p = sine[synth[i].counter >> 8];                  break;
-          case WAVEFORM_STRINGS:  p = strings[synth[i].counter >> 8];               break;
-          case WAVEFORM_CLARINET: p = clarinet[synth[i].counter >> 8];              break;
+          case WAVEFORM_SAW:                                                            break;
+          case WAVEFORM_TRIANGLE: p = 2 * ((p >> 15) ? p : (65535 - p));                break;
+          case WAVEFORM_SQUARE:   p = 0 - (p > (32768 - modWheel.curValue * 7 * 16));   break;
+          case WAVEFORM_HYBRID:   p = p < synth[i].A ? (p >> 8) * synth[i].invA
+                                    : (p > synth[i].B ? (256 - (p >> 8)) * synth[i].invB
+                                    : 0 );
+          case WAVEFORM_SINE:     p = sine[p >> 8] << 8;             break;
+          case WAVEFORM_STRINGS:  p = strings[p >> 8] << 8;          break;
+          case WAVEFORM_CLARINET: p = clarinet[p >> 8] << 8;         break;
           default:                                                                  break;
         }
         mix += (p * synth[i].eq);  // P[16bit] * EQ[3bit] =[19bit]
@@ -1675,7 +1675,7 @@
     mix *= attenuation[(playbackMode == SYNTH_POLY) * voices]; // [19bit]*atten[6bit] = [25bit]
     mix *= velWheel.curValue; // [25bit]*vel[7bit]=[32bit], poly+ 
     level = mix >> 24;  // [32bit] - [8bit] = [24bit]
-    pwm_set_chan_level(TONE_SL, TONE_CH, level);
+    pwm_set_chan_level(PIEZO_SL, PIEZO_CH, level);
   }
   // RUN ON CORE 1
   byte isoTwoTwentySix(float f) {
@@ -1812,13 +1812,13 @@
     }
   }
 
-  void setupPiezo() {
-    gpio_set_function(TONEPIN, GPIO_FUNC_PWM);      // set that pin as PWM
-    pwm_set_phase_correct(TONE_SL, true);           // phase correct sounds better
-    pwm_set_wrap(TONE_SL, 254);                     // 0 - 254 allows 0 - 255 level
-    pwm_set_clkdiv(TONE_SL, 1.0f);                  // run at full clock speed
-    pwm_set_chan_level(TONE_SL, TONE_CH, 0);        // initialize at zero to prevent whining sound
-    pwm_set_enabled(TONE_SL, true);                 // ENGAGE!
+  void setupSynth() {
+    gpio_set_function(PIEZOPIN, GPIO_FUNC_PWM);      // set that pin as PWM
+    pwm_set_phase_correct(PIEZO_SL, true);           // phase correct sounds better
+    pwm_set_wrap(PIEZO_SL, 254);                     // 0 - 254 allows 0 - 255 level
+    pwm_set_clkdiv(PIEZO_SL, 1.0f);                  // run at full clock speed
+    pwm_set_chan_level(PIEZO_SL, PIEZO_CH, 0);        // initialize at zero to prevent whining sound
+    pwm_set_enabled(PIEZO_SL, true);                 // ENGAGE!
     hw_set_bits(&timer_hw->inte, 1u << ALARM_NUM);  // initialize the timer
     irq_set_exclusive_handler(ALARM_IRQ, poll);     // function to run every interrupt
     irq_set_enabled(ALARM_IRQ, true);               // ENGAGE!
@@ -2685,7 +2685,7 @@
     dealWithRotary();  // deal with menu
   }
   void setup1() {  // set up on second core
-    setupPiezo();
+    setupSynth();
   }
   void loop1() {  // run on second core
     readKnob();
