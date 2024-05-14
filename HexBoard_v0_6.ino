@@ -1788,6 +1788,7 @@
     irq_set_exclusive_handler(ALARM_IRQ, poll);     // function to run every interrupt
     irq_set_enabled(ALARM_IRQ, true);               // ENGAGE!
     timer_hw->alarm[ALARM_NUM] = readClock() + POLL_INTERVAL_IN_MICROSECONDS;
+    resetBuzzers();
     sendToLog("buzzer is ready.");
   }
 
