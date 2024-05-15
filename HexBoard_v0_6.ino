@@ -119,7 +119,7 @@
   #define SYNTH_MONO 1
   #define SYNTH_ARPEGGIO 2
   #define SYNTH_POLY 3
-  byte playbackMode = SYNTH_POLY;
+  byte playbackMode = SYNTH_OFF;
 
   #define WAVEFORM_SINE 0
   #define WAVEFORM_STRINGS 1
@@ -836,7 +836,7 @@
     optional sending of log messages
     to the Serial port
   */
-  #define DIAGNOSTICS_ON false  
+  #define DIAGNOSTICS_ON true 
   void sendToLog(std::string msg) {
     if (DIAGNOSTICS_ON) {
       Serial.println(msg.c_str());
@@ -1385,25 +1385,22 @@
     //
     if (current.tuning().stepSize == 100.0) {
       MPEpitchBendsNeeded = 1;
-      setMPEzone(1, 0);
+    } else if (round(current.tuning().cycleLength * current.tuning().stepSize) != 1200) {
+      MPEpitchBendsNeeded = 255;
     } else {
-      if (round(current.tuning().cycleLength * current.tuning().stepSize) != 1200) {
-        MPEpitchBendsNeeded = 255;
-      } else {
-        MPEpitchBendsNeeded = current.tuning().cycleLength / std::gcd(12, current.tuning().cycleLength);
+      MPEpitchBendsNeeded = current.tuning().cycleLength / std::gcd(12, current.tuning().cycleLength);
+    }
+    if (MPEpitchBendsNeeded > 15) {
+      setMPEzone(1, 15);   // MPE zone 1 = ch 2 thru 16
+      while (!MPEchQueue.empty()) {     // empty the channel queue
+        MPEchQueue.pop();
       }
-      if (MPEpitchBendsNeeded > 15) {
-        setMPEzone(1, 15);   // MPE zone 1 = ch 2 thru 16
-        while (!MPEchQueue.empty()) {     // empty the channel queue
-          MPEchQueue.pop();
-        }
-        for (byte i = 2; i <= 16; i++) {
-          MPEchQueue.push(i);           // fill the channel queue
-          sendToLog("pushed ch " + std::to_string(i) + " to the open channel queue");
-        }
-      } else {
-        setMPEzone(1, MPEpitchBendsNeeded);
+      for (byte i = 2; i <= 16; i++) {
+        MPEchQueue.push(i);           // fill the channel queue
+        sendToLog("pushed ch " + std::to_string(i) + " to the open channel queue");
       }
+    } else {
+      setMPEzone(1, 0);
     }
     // force pitch bend back to the expected range of 2 semitones.
     for (byte i = 1; i <= 16; i++) {
