@@ -1659,7 +1659,7 @@
         synth[i].counter += synth[i].increment; // should loop from 65536 -> 0        
         p = synth[i].counter;
         t = p >> 8;
-        switch (synth[i].wave) {
+        switch (currWave) {
           case WAVEFORM_SAW:                                                            break;
           case WAVEFORM_TRIANGLE: p = 2 * ((p >> 15) ? p : (65535 - p));                break;
           case WAVEFORM_SQUARE:   p = 0 - (p > (32768 - modWheel.curValue * 7 * 16));   break;
