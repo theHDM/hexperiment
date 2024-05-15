@@ -1394,10 +1394,10 @@
       }
       if (MPEpitchBendsNeeded > 15) {
         setMPEzone(1, 15);   // MPE zone 1 = ch 2 thru 16
+        while (!MPEchQueue.empty()) {     // empty the channel queue
+          MPEchQueue.pop();
+        }
         for (byte i = 2; i <= 16; i++) {
-          while (!MPEchQueue.empty()) {     // empty the channel queue
-            MPEchQueue.pop();
-          }
           MPEchQueue.push(i);           // fill the channel queue
           sendToLog("pushed ch " + std::to_string(i) + " to the open channel queue");
         }
