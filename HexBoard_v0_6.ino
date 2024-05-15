@@ -1189,7 +1189,7 @@
             break;
           case RAINBOW_MODE:      // This mode assigns the root note as red, and the rest as saturated spectrum colors across the rainbow.
             setColor = 
-              { 360.0 * ((float)paletteIndex / (float)current.tuning().cycleLength)
+              { 360 * ((float)paletteIndex / (float)current.tuning().cycleLength)
               , SAT_VIVID
               , VALUE_NORMAL
               };
@@ -1215,7 +1215,10 @@
             float offCenter = cents - center;
             int16_t altHue = positiveMod((int)(150 + (perf * ((offCenter > 0) ? -72 : 72)) - round(1.44 * offCenter)), 360);
             float deSaturate = perf * (abs(offCenter) < 20) * (1 - (0.02 * abs(offCenter)));
-            setColor = { (float)altHue, 255 - (255 * deSaturate), (cents ? VALUE_SHADE : VALUE_NORMAL) };
+            setColor = { 
+              (float)altHue, 
+              (byte)(255 - round(255 * deSaturate)), 
+              (byte)(cents ? VALUE_SHADE : VALUE_NORMAL) };
             break;
         }
         h[i].LEDcodeRest   = getLEDcode(setColor);
@@ -1231,7 +1234,7 @@
 
   void resetVelocityLEDs() {
     colorDef tempColor = 
-      { (runTime % (rainbowDegreeTime * 360)) / rainbowDegreeTime
+      { (runTime % (rainbowDegreeTime * 360)) / (float)rainbowDegreeTime
       , SAT_MODERATE
       , byteLerp(0,255,85,127,velWheel.curValue)
       };
@@ -1246,12 +1249,12 @@
   void resetWheelLEDs() {
     // middle button
     byte tempSat = SAT_BW;
-    colorDef tempColor = {HUE_NONE, tempSat, (toggleWheel ? VALUE_SHADE : VALUE_LOW)};
+    colorDef tempColor = {HUE_NONE, tempSat, (byte)(toggleWheel ? VALUE_SHADE : VALUE_LOW)};
     strip.setPixelColor(assignCmd[3], getLEDcode(tempColor));
     if (toggleWheel) {
       // pb red / green
       tempSat = byteLerp(SAT_BW,SAT_VIVID,0,8192,abs(pbWheel.curValue));
-      tempColor = {((pbWheel.curValue > 0) ? HUE_RED : HUE_CYAN), tempSat, VALUE_FULL};
+      tempColor = {(float)((pbWheel.curValue > 0) ? HUE_RED : HUE_CYAN), tempSat, VALUE_FULL};
       strip.setPixelColor(assignCmd[5], getLEDcode(tempColor));
 
       tempColor.val = tempSat * (pbWheel.curValue > 0);
@@ -1262,7 +1265,11 @@
     } else {
       // mod blue / yellow
       tempSat = byteLerp(SAT_BW,SAT_VIVID,0,64,abs(modWheel.curValue - 63));
-      tempColor = {((modWheel.curValue > 63) ? HUE_YELLOW : HUE_INDIGO), tempSat, 127 + (tempSat / 2)};
+      tempColor = {
+        (float)((modWheel.curValue > 63) ? HUE_YELLOW : HUE_INDIGO), 
+        tempSat, 
+        (byte)(127 + (tempSat / 2))
+      };
       strip.setPixelColor(assignCmd[6], getLEDcode(tempColor));
 
       if (modWheel.curValue <= 63) {
@@ -1491,7 +1498,7 @@
   #define AUDIO_PIN 25
   #define AUDIO_SLICE 4
   #define AUDIO_CHNL 1
-/*
+  /*
     These definitions provide 8-bit samples to emulate.
     You can add your own as desired; it must
     be an array of 256 values, each from 0 to 255.
@@ -1559,10 +1566,8 @@
     at different frequencies. Said frequencies
     are controlled via constants here.
   */
-    #define TRANSITION_SQUARE   200.0
-    #define TRANSITION_SAW_LOW  300.0
-    #define TRANSITION_SAW_HIGH 1000.0
-    #define TRANSITION_TRIANGLE 1250.0
+    #define TRANSITION_SQUARE   220.0
+    #define TRANSITION_TRIANGLE 880.0
   /*
     The poll interval represents how often a
     new sample value is emulated on the PWM
@@ -1609,7 +1614,7 @@
     flag to "true" to enable it. This may also
     be moved to a Testing menu option.
   */
-  #define EQUAL_LOUDNESS_ADJUST false
+  #define EQUAL_LOUDNESS_ADJUST true
   /*
     This class defines a virtual oscillator.
     It stores an oscillation frequency in
@@ -1629,10 +1634,7 @@
   public:
     uint16_t increment = 0;
     uint16_t counter = 0;
-    uint16_t A = 0;
-    uint16_t B = 0;
-    byte invA = 255;
-    byte invB = 255;
+    byte wave = currWave;
     byte eq = 0;
   };
   oscillator synth[POLYPHONY_LIMIT];          // maximum polyphony
@@ -1655,13 +1657,10 @@
       if (synth[i].increment) {
         synth[i].counter += synth[i].increment; // should loop from 65536 -> 0        
         p = synth[i].counter;
-        switch (currWave) {
+        switch (synth[i].wave) {
           case WAVEFORM_SAW:                                                            break;
           case WAVEFORM_TRIANGLE: p = 2 * ((p >> 15) ? p : (65535 - p));                break;
           case WAVEFORM_SQUARE:   p = 0 - (p > (32768 - modWheel.curValue * 7 * 16));   break;
-          case WAVEFORM_HYBRID:   p = p < synth[i].A ? (p >> 8) * synth[i].invA
-                                    : (p > synth[i].B ? (256 - (p >> 8)) * synth[i].invB
-                                    : 0 );
           case WAVEFORM_SINE:     p = sine[p >> 8] << 8;             break;
           case WAVEFORM_STRINGS:  p = strings[p >> 8] << 8;          break;
           case WAVEFORM_CLARINET: p = clarinet[p >> 8] << 8;         break;
@@ -1675,7 +1674,7 @@
     mix *= attenuation[(playbackMode == SYNTH_POLY) * voices]; // [19bit]*atten[6bit] = [25bit]
     mix *= velWheel.curValue; // [25bit]*vel[7bit]=[32bit], poly+ 
     level = mix >> 24;  // [32bit] - [8bit] = [24bit]
-    pwm_set_chan_level(PIEZO_SL, PIEZO_CH, level);
+    pwm_set_chan_level(PIEZO_SLICE, PIEZO_CHNL, level);
   }
   // RUN ON CORE 1
   byte isoTwoTwentySix(float f) {
@@ -1713,19 +1712,13 @@
     synth[c].counter = 0;
     synth[c].increment = round(f * POLL_INTERVAL_IN_MICROSECONDS * 0.065536);   // cycle 0-65535 at resultant frequency
     synth[c].eq = isoTwoTwentySix(f);
-    if (f < TRANSITION_SQUARE) {          synth[c].B = 65535;
-    } else if (f < TRANSITION_SAW_LOW) {  synth[c].B = 65535
-                                                     * (TRANSITION_SAW_LOW - f) 
-                                                     / (TRANSITION_SAW_LOW - TRANSITION_SQUARE);
-    } else if (f < TRANSITION_SAW_HIGH) { synth[c].B = 0;
-    } else if (f < TRANSITION_TRIANGLE) { synth[c].B = 32768
-                                                     * (f - TRANSITION_SAW_HIGH) 
-                                                     / (TRANSITION_TRIANGLE - TRANSITION_HIGH);
-    } else {                              synth[c].B = 32768;
+    synth[c].wave = currWave;
+    if (currWave == WAVEFORM_HYBRID) {
+      if (f < TRANSITION_SQUARE) {          synth[c].wave = WAVEFORM_SQUARE;
+      } else if (f < TRANSITION_TRIANGLE) { synth[c].wave = WAVEFORM_SAW;
+      } else {                              synth[c].wave = WAVEFORM_TRIANGLE;
+      }
     }
-    synth[c].invB = (1u << 24) / (65536 - synth[c].B);
-    synth[c].A = (f > TRANSITION_SAW_HIGH) * synth[c].B;
-    synth[c].invA = (1u << 24) / (synth[c].A > 0 ? synth[c].A : 1);
   }
 
   // USE THIS IN MONO OR ARPEG MODE ONLY
@@ -1759,6 +1752,9 @@
     for (byte i = 0; i < POLYPHONY_LIMIT; i++) {
       synth[i].increment = 0;
       synth[i].counter = 0;
+    }
+    for (byte i = 0; i < LED_COUNT; i++) {
+      h[i].synthCh = 0;
     }
     if (playbackMode == SYNTH_POLY) {
       for (byte i = 0; i < POLYPHONY_LIMIT; i++) {
@@ -1800,7 +1796,7 @@
   }
 
   void trySynthNoteOff(byte x) {
-    if (h[x].MIDIch && playbackMode && (playbackMode != SYNTH_POLY)) {
+    if (playbackMode && (playbackMode != SYNTH_POLY)) {
       replaceMonoSynthWith(findNextHeldNote());
     }
     if (playbackMode == SYNTH_POLY) {
@@ -1813,12 +1809,12 @@
   }
 
   void setupSynth() {
-    gpio_set_function(PIEZOPIN, GPIO_FUNC_PWM);      // set that pin as PWM
-    pwm_set_phase_correct(PIEZO_SL, true);           // phase correct sounds better
-    pwm_set_wrap(PIEZO_SL, 254);                     // 0 - 254 allows 0 - 255 level
-    pwm_set_clkdiv(PIEZO_SL, 1.0f);                  // run at full clock speed
-    pwm_set_chan_level(PIEZO_SL, PIEZO_CH, 0);        // initialize at zero to prevent whining sound
-    pwm_set_enabled(PIEZO_SL, true);                 // ENGAGE!
+    gpio_set_function(PIEZO_PIN, GPIO_FUNC_PWM);      // set that pin as PWM
+    pwm_set_phase_correct(PIEZO_SLICE, true);           // phase correct sounds better
+    pwm_set_wrap(PIEZO_SLICE, 254);                     // 0 - 254 allows 0 - 255 level
+    pwm_set_clkdiv(PIEZO_SLICE, 1.0f);                  // run at full clock speed
+    pwm_set_chan_level(PIEZO_SLICE, PIEZO_CHNL, 0);        // initialize at zero to prevent whining sound
+    pwm_set_enabled(PIEZO_SLICE, true);                 // ENGAGE!
     hw_set_bits(&timer_hw->inte, 1u << ALARM_NUM);  // initialize the timer
     irq_set_exclusive_handler(ALARM_IRQ, poll);     // function to run every interrupt
     irq_set_enabled(ALARM_IRQ, true);               // ENGAGE!
@@ -1906,7 +1902,7 @@
 
   void animateRadial() {
     for (byte i = 0; i < LED_COUNT; i++) {                                // check every hex
-      if (!(h[i].isCmd)) {                                                // that is a note
+      if (!(h[i].isCmd) && (h[i].inScale || !scaleLock)) {                                                // that is a note
         uint64_t radius = animFrame(i);
         if ((radius > 0) && (radius < 16)) {                              // played in the last 16 frames
           byte steps = ((animationType == ANIMATE_SPLASH) ? radius : 1);  // star = 1 step to next corner; ring = 1 step per hex
@@ -2334,7 +2330,7 @@
     If it's different from the previous one, then
     re-apply the scale to the grid. In any case, go to the
     main menu when done.
-*/
+  */
   void changeScale(GEMCallbackData callbackData) {   // when you change the scale via the menu
     int selection = callbackData.valInt;
     if (selection != current.scaleIndex) {
@@ -2575,8 +2571,8 @@
           if (h[i].isCmd) {
             cmdOff(i);
           } else if (h[i].inScale || (!scaleLock)) {
-            trySynthNoteOff(i); // must be done in this order
-            tryMIDInoteOff(i);  // because the last action must be to set the note to have MIDI channel = zero
+            tryMIDInoteOff(i);
+            trySynthNoteOff(i); 
           }
           break;
         case 3: // held
