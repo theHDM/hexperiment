@@ -3,7 +3,7 @@
     HexBoard
     Copyright 2022-2023 Jared DeCook and Zach DeCook
     with help from Nicholas Fox
-    Firmware v0.6.prerelease 2024-05-11
+    Firmware v0.6.prerelease 2024-05-14
     Licensed under the GNU GPL Version 3.
 
     Hardware information:
@@ -61,6 +61,7 @@
     the code into a library at that point.
   */
 // @init
+  #define HARDWARE_VERSION 2      // 1 = v1.1 board. 2 = v1.2 board.
   #include <Arduino.h>            // this is necessary to talk to the Hexboard!
   #include <Wire.h>               // this is necessary to deal with the pins and wires
   #define SDAPIN 16
@@ -114,19 +115,20 @@
   int pbWheelSpeed = 1024;
   int velWheelSpeed = 8;
 
-  #define BUZZ_OFF 0
-  #define BUZZ_MONO 1
-  #define BUZZ_ARPEGGIO 2
-  #define BUZZ_POLY 3
-  byte playbackMode = BUZZ_POLY;
+  #define SYNTH_OFF 0
+  #define SYNTH_MONO 1
+  #define SYNTH_ARPEGGIO 2
+  #define SYNTH_POLY 3
+  byte playbackMode = SYNTH_OFF;
 
   #define WAVEFORM_SINE 0
   #define WAVEFORM_STRINGS 1
   #define WAVEFORM_CLARINET 2
+  #define WAVEFORM_HYBRID 7
   #define WAVEFORM_SQUARE 8
   #define WAVEFORM_SAW 9
   #define WAVEFORM_TRIANGLE 10 
-  byte currWave = WAVEFORM_SAW;
+  byte currWave = WAVEFORM_HYBRID;
 
   #define RAINBOW_MODE 0
   #define TIERED_COLOR_MODE 1
@@ -834,7 +836,7 @@
     optional sending of log messages
     to the Serial port
   */
-  #define DIAGNOSTICS_ON false  
+  #define DIAGNOSTICS_ON true 
   void sendToLog(std::string msg) {
     if (DIAGNOSTICS_ON) {
       Serial.println(msg.c_str());
@@ -948,7 +950,7 @@
     whether the note is in the selected scale,
     whether the button is flagged to be animated,
     and whether the note is currently 
-    sounding on MIDI / the buzzer.
+    sounding on MIDI / the synth.
    
     Needless to say, this is an important class.
   */
@@ -973,8 +975,8 @@
     byte     note = UNUSED_NOTE;  // MIDI note or control parameter corresponding to this hex
     int16_t  bend = 0;            // in microtonal mode, the pitch bend for this note needed to be tuned correctly
     byte     MIDIch = 0;          // what MIDI channel this note is playing on
-    byte     buzzCh = 0;          // what buzzer ch this is playing on
-    float    frequency = 0.0;     // what frequency to ring on the buzzer
+    byte     synthCh = 0;         // what synth polyphony ch this is playing on
+    float    frequency = 0.0;     // what frequency to ring on the synther
   };
   /*
     This class is like a virtual wheel.
@@ -1187,7 +1189,7 @@
             break;
           case RAINBOW_MODE:      // This mode assigns the root note as red, and the rest as saturated spectrum colors across the rainbow.
             setColor = 
-              { 360.0 * ((float)paletteIndex / (float)current.tuning().cycleLength)
+              { 360 * ((float)paletteIndex / (float)current.tuning().cycleLength)
               , SAT_VIVID
               , VALUE_NORMAL
               };
@@ -1213,7 +1215,10 @@
             float offCenter = cents - center;
             int16_t altHue = positiveMod((int)(150 + (perf * ((offCenter > 0) ? -72 : 72)) - round(1.44 * offCenter)), 360);
             float deSaturate = perf * (abs(offCenter) < 20) * (1 - (0.02 * abs(offCenter)));
-            setColor = { (float)altHue, 255 - (255 * deSaturate), (cents ? VALUE_SHADE : VALUE_NORMAL) };
+            setColor = { 
+              (float)altHue, 
+              (byte)(255 - round(255 * deSaturate)), 
+              (byte)(cents ? VALUE_SHADE : VALUE_NORMAL) };
             break;
         }
         h[i].LEDcodeRest   = getLEDcode(setColor);
@@ -1229,7 +1234,7 @@
 
   void resetVelocityLEDs() {
     colorDef tempColor = 
-      { (runTime % (rainbowDegreeTime * 360)) / rainbowDegreeTime
+      { (runTime % (rainbowDegreeTime * 360)) / (float)rainbowDegreeTime
       , SAT_MODERATE
       , byteLerp(0,255,85,127,velWheel.curValue)
       };
@@ -1244,12 +1249,12 @@
   void resetWheelLEDs() {
     // middle button
     byte tempSat = SAT_BW;
-    colorDef tempColor = {HUE_NONE, tempSat, (toggleWheel ? VALUE_SHADE : VALUE_LOW)};
+    colorDef tempColor = {HUE_NONE, tempSat, (byte)(toggleWheel ? VALUE_SHADE : VALUE_LOW)};
     strip.setPixelColor(assignCmd[3], getLEDcode(tempColor));
     if (toggleWheel) {
       // pb red / green
       tempSat = byteLerp(SAT_BW,SAT_VIVID,0,8192,abs(pbWheel.curValue));
-      tempColor = {((pbWheel.curValue > 0) ? HUE_RED : HUE_CYAN), tempSat, VALUE_FULL};
+      tempColor = {(float)((pbWheel.curValue > 0) ? HUE_RED : HUE_CYAN), tempSat, VALUE_FULL};
       strip.setPixelColor(assignCmd[5], getLEDcode(tempColor));
 
       tempColor.val = tempSat * (pbWheel.curValue > 0);
@@ -1260,7 +1265,11 @@
     } else {
       // mod blue / yellow
       tempSat = byteLerp(SAT_BW,SAT_VIVID,0,64,abs(modWheel.curValue - 63));
-      tempColor = {((modWheel.curValue > 63) ? HUE_YELLOW : HUE_INDIGO), tempSat, 127 + (tempSat / 2)};
+      tempColor = {
+        (float)((modWheel.curValue > 63) ? HUE_YELLOW : HUE_INDIGO), 
+        tempSat, 
+        (byte)(127 + (tempSat / 2))
+      };
       strip.setPixelColor(assignCmd[6], getLEDcode(tempColor));
 
       if (modWheel.curValue <= 63) {
@@ -1359,42 +1368,36 @@
   }
 
   void resetTuningMIDI() {
-    // currently the only way that microtonal
-    // MIDI works is via MPE (MIDI polyphonic expression).
-    // This assigns re-tuned notes to an independent channel
-    // so they can be pitched separately.
-    //
-    // if operating in a standard 12-EDO tuning, or in a
-    // tuning with steps that are all exact multiples of
-    // 100 cents, then MPE is not necessary.
-    //
-    // otherwise, determine how many different channels are
-    // required to fully realize this tuning. if this is a
-    // non-octave tuning like Carlos or BP, we should just
-    // assume this number is unbounded. Otherwise, for
-    // N-EDO the number is N divided by GCD(N,12).
-    //
+    /*
+      currently the only way that microtonal
+      MIDI works is via MPE (MIDI polyphonic expression).
+      This assigns re-tuned notes to an independent channel
+      so they can be pitched separately.
+    
+      if operating in a standard 12-EDO tuning, or in a
+      tuning with steps that are all exact multiples of
+      100 cents, then MPE is not necessary.
+    */
     if (current.tuning().stepSize == 100.0) {
       MPEpitchBendsNeeded = 1;
-      setMPEzone(1, 0);
+    /*  this was an attempt to allow unlimited polyphony for certain EDOs. doesn't work in Logic Pro.
+    } else if (round(current.tuning().cycleLength * current.tuning().stepSize) == 1200) {
+      MPEpitchBendsNeeded = current.tuning().cycleLength / std::gcd(12, current.tuning().cycleLength);
+    */
     } else {
-      if (current.tuning().cycleLength * current.tuning().stepSize != 1200.0) {
-        MPEpitchBendsNeeded = 255;
-      } else {
-        MPEpitchBendsNeeded = current.tuning().cycleLength / std::gcd(12, current.tuning().cycleLength);
+      MPEpitchBendsNeeded = 255;
+    }
+    if (MPEpitchBendsNeeded > 15) {
+      setMPEzone(1, 15);   // MPE zone 1 = ch 2 thru 16
+      while (!MPEchQueue.empty()) {     // empty the channel queue
+        MPEchQueue.pop();
       }
-      if (MPEpitchBendsNeeded > 15) {
-        setMPEzone(1, 15);   // MPE zone 1 = ch 2 thru 16
-        for (byte i = 2; i <= 16; i++) {
-          while (!MPEchQueue.empty()) {     // empty the channel queue
-            MPEchQueue.pop();
-          }
-          MPEchQueue.push(i);           // fill the channel queue
-          sendToLog("pushed ch " + std::to_string(i) + " to the open channel queue");
-        }
-      } else {
-        setMPEzone(1, MPEpitchBendsNeeded);
+      for (byte i = 2; i <= 16; i++) {
+        MPEchQueue.push(i);           // fill the channel queue
+        sendToLog("pushed ch " + std::to_string(i) + " to the open channel queue");
       }
+    } else {
+      setMPEzone(1, 0);
     }
     // force pitch bend back to the expected range of 2 semitones.
     for (byte i = 1; i <= 16; i++) {
@@ -1471,23 +1474,26 @@
 
 // @synth
   /*
-    This section of the code handles the piezo buzzer
+    This section of the code handles audio
+    output via the piezo buzzer and/or the
+    headphone jack (on hardware v1.2 only)
   */
   #include "hardware/pwm.h"       // library of code to access the processor's built in pulse wave modulation features
   #include "hardware/irq.h"       // library of code to let you interrupt code execution to run something of higher priority
   /*
-    These values support the piezo buzzer functions.
     It is more convenient to pre-define the correct
     pulse wave modulation slice and channel associated
-    with the TONE_PIN on this processor (see RP2040
+    with the PIEZO_PIN on this processor (see RP2040
     manual) than to have it looked up each time.
   */
-  #define TONEPIN 23
-  #define TONE_SL 3
-  #define TONE_CH 1
+  #define PIEZO_PIN 23
+  #define PIEZO_SLICE 3
+  #define PIEZO_CHNL 1
+  #define AUDIO_PIN 25
+  #define AUDIO_SLICE 4
+  #define AUDIO_CHNL 1
   /*
-    These definitions provide 
-    8-bit samples to emulate in the buzzer.
+    These definitions provide 8-bit samples to emulate.
     You can add your own as desired; it must
     be an array of 256 values, each from 0 to 255.
     Ideally the waveform is normalized so that the
@@ -1512,7 +1518,6 @@
       49,  46,  44,  42,  39,  37,  35,  33,  31,  29,  27,  25,  23,  21,  19,  18, 
       16,  15,  13,  12,  10,   9,   8,   7,   6,   5,   4,   3,   3,   2,   1,   1
   };
-
   byte strings[] = {
       0,   0,   0,   1,   3,   6,  10,  14,  20,  26,  33,  41,  50,  59,  68,  77, 
       87,  97, 106, 115, 124, 132, 140, 146, 152, 157, 161, 164, 166, 167, 167, 167, 
@@ -1531,8 +1536,6 @@
       58,  56,  54,  52,  50,  49,  48,  47,  46,  45,  45,  44,  43,  42,  41,  40, 
       39,  37,  35,  33,  31,  28,  25,  22,  19,  16,  13,  10,   7,   5,   2,   1
   };
-  
-
   byte clarinet[] = {
       0,   0,   2,   7,  14,  21,  30,  38,  47,  54,  61,  66,  70,  72,  73,  74, 
       73,  73,  72,  71,  70,  71,  72,  74,  76,  80,  84,  88,  93,  97, 101, 105, 
@@ -1552,6 +1555,14 @@
     246, 237, 224, 209, 191, 171, 150, 127, 105,  84,  64,  46,  31,  18,   9,   2, 
   };
   /*
+    The hybrid synth sound blends between
+    square, saw, and triangle waveforms
+    at different frequencies. Said frequencies
+    are controlled via constants here.
+  */
+    #define TRANSITION_SQUARE   220.0
+    #define TRANSITION_TRIANGLE 880.0
+  /*
     The poll interval represents how often a
     new sample value is emulated on the PWM
     hardware. It is the inverse of the digital
@@ -1567,8 +1578,8 @@
   */
   #define POLL_INTERVAL_IN_MICROSECONDS 24
   /*
-    Eight voice polyphony can be simulated on
-    the buzzer. Any more voices and the
+    Eight voice polyphony can be simulated. 
+    Any more voices and the
     resolution is too low to distinguish;
     also, the code becomes too slow to keep
     up with the poll interval. This value
@@ -1594,9 +1605,10 @@
     frequencies where human hearing is sensitive.
 
     By default it's off but you can change this
-    flag to "true" to enable it.
+    flag to "true" to enable it. This may also
+    be moved to a Testing menu option.
   */
-  #define EQUAL_LOUDNESS_ADJUST false
+  #define EQUAL_LOUDNESS_ADJUST true
   /*
     This class defines a virtual oscillator.
     It stores an oscillation frequency in
@@ -1616,15 +1628,16 @@
   public:
     uint16_t increment = 0;
     uint16_t counter = 0;
+    byte wave = currWave;
     byte eq = 0;
   };
   oscillator synth[POLYPHONY_LIMIT];          // maximum polyphony
-  std::queue<byte> buzzChQueue;
-  const byte attenuation[] = {64,64,32,21,16,12,10,9,8}; 
+  std::queue<byte> synthChQueue;
+  const byte attenuation[] = {64,24,17,14,12,11,10,9,8}; // full volume in mono mode; equalized volume in poly.
 
-  byte arpeggiatingNow = UNUSED_NOTE;         // if this is 255, buzzer set to off (0% duty cycle)
-  uint64_t arpeggiateTime = 0;                // Used to keep track of when this note started buzzin
-  uint64_t arpeggiateLength = 65'536;         // in microseconds
+  byte arpeggiatingNow = UNUSED_NOTE;         // if this is 255, set to off (0% duty cycle)
+  uint64_t arpeggiateTime = 0;                // Used to keep track of when this note started playing in ARPEG mode
+  uint64_t arpeggiateLength = 65'536;         // in microseconds. approx a 1/32 note at 114 BPM
 
   // RUN ON CORE 2
   void poll() {
@@ -1632,65 +1645,74 @@
     timer_hw->alarm[ALARM_NUM] = readClock() + POLL_INTERVAL_IN_MICROSECONDS;
     uint32_t mix = 0;
     byte voices = POLYPHONY_LIMIT;
-    byte p;
+    uint16_t p;
     byte level = 0;
     for (byte i = 0; i < POLYPHONY_LIMIT; i++) {
       if (synth[i].increment) {
-        synth[i].counter += synth[i].increment; // should loop from 65536 -> 0
-        p = (synth[i].counter >> 8);
-        switch (currWave) {
-          case WAVEFORM_SAW:                                                        break;
-          case WAVEFORM_TRIANGLE: p = 2 * ((p < 128) ? p : (255 - p));              break;
-          case WAVEFORM_SQUARE:   p = 0 - (p > (128 - modWheel.curValue * 0.875));  break;
-          case WAVEFORM_SINE:     p = sine[p];                                      break;
-          case WAVEFORM_STRINGS:  p = strings[p];                                   break;
-          case WAVEFORM_CLARINET: p = clarinet[p];                                  break;
+        synth[i].counter += synth[i].increment; // should loop from 65536 -> 0        
+        p = synth[i].counter;
+        switch (synth[i].wave) {
+          case WAVEFORM_SAW:                                                            break;
+          case WAVEFORM_TRIANGLE: p = 2 * ((p >> 15) ? p : (65535 - p));                break;
+          case WAVEFORM_SQUARE:   p = 0 - (p > (32768 - modWheel.curValue * 7 * 16));   break;
+          case WAVEFORM_SINE:     p = sine[p >> 8] << 8;             break;
+          case WAVEFORM_STRINGS:  p = strings[p >> 8] << 8;          break;
+          case WAVEFORM_CLARINET: p = clarinet[p >> 8] << 8;         break;
           default:                                                                  break;
         }
-        mix += (p * synth[i].eq);  // P[8bit] * EQ[8bit] =[16bit]
+        mix += (p * synth[i].eq);  // P[16bit] * EQ[3bit] =[19bit]
       } else {
         --voices;
       }
     }
-    mix = mix * attenuation[voices] * velWheel.curValue; // [16bit]*vel[7bit]=[23bit], poly+atten=[6bit] = [29bit] 
-    level = mix >> 21;  // [29bit] - [8bit] = [21bit]
-    pwm_set_chan_level(TONE_SL, TONE_CH, level);
+    mix *= attenuation[(playbackMode == SYNTH_POLY) * voices]; // [19bit]*atten[6bit] = [25bit]
+    mix *= velWheel.curValue; // [25bit]*vel[7bit]=[32bit], poly+ 
+    level = mix >> 24;  // [32bit] - [8bit] = [24bit]
+    pwm_set_chan_level(PIEZO_SLICE, PIEZO_CHNL, level);
   }
   // RUN ON CORE 1
   byte isoTwoTwentySix(float f) {
     /*
       a very crude implementation of ISO 226
       equal loudness curves
-        Hz dB  Amp = sqrt(10^(dB/10))
-       200  0  255
-       800 -3  181   
-      1500  0  255
-      3250 -6  127
-      5000  0  255
+        Hz dB  Amp ~ sqrt(10^(dB/10))
+       200  0  8
+       800 -3  6   
+      1500  0  8
+      3250 -6  4
+      5000  0  8
     */
     if ((f < 8.0) || (f > 12500.0)) {   // really crude low- and high-pass
       return 0;
     } else {
       if (EQUAL_LOUDNESS_ADJUST) {
         if ((f <= 200.0) || (f >= 5000.0)) {
-          return 255;
+          return 8;
         } else {
           if (f < 1500.0) {
-            return 181 + 74  * (float)(abs(f-800) / 700);
+            return 6 + 2 * (float)(abs(f-800) / 700);
           } else {
-            return 127 + 128 * (float)(abs(f-3250) / 1750);
+            return 4 + 4 * (float)(abs(f-3250) / 1750);
           }
         }
       } else {
-        return 255;
+        return 8;
       }
     }
   }
-  void setBuzzer(float f, byte c) {
-    synth[c - 1].counter = 0;
-    float FwithPB = f * exp2(pbWheel.curValue * PITCH_BEND_SEMIS / 98304.0);
-    synth[c - 1].increment = round(FwithPB * POLL_INTERVAL_IN_MICROSECONDS * 0.065536);   // cycle 0-65535 at resultant frequency
-    synth[c - 1].eq = isoTwoTwentySix(FwithPB);
+  void setSynthFreq(float frequency, byte channel) {
+    byte c = channel - 1;
+    float f = frequency * exp2(pbWheel.curValue * PITCH_BEND_SEMIS / 98304.0);
+    synth[c].counter = 0;
+    synth[c].increment = round(f * POLL_INTERVAL_IN_MICROSECONDS * 0.065536);   // cycle 0-65535 at resultant frequency
+    synth[c].eq = isoTwoTwentySix(f);
+    synth[c].wave = currWave;
+    if (currWave == WAVEFORM_HYBRID) {
+      if (f < TRANSITION_SQUARE) {          synth[c].wave = WAVEFORM_SQUARE;
+      } else if (f < TRANSITION_TRIANGLE) { synth[c].wave = WAVEFORM_SAW;
+      } else {                              synth[c].wave = WAVEFORM_TRIANGLE;
+      }
+    }
   }
 
   // USE THIS IN MONO OR ARPEG MODE ONLY
@@ -1706,28 +1728,31 @@
     }
     return n;
   }
-  void replaceBuzzerWith(byte x) {
+  void replaceMonoSynthWith(byte x) {
     if (arpeggiatingNow != x) {
       arpeggiatingNow = x;
       if (arpeggiatingNow != UNUSED_NOTE) {
-        setBuzzer(h[arpeggiatingNow].frequency, 1);
+        setSynthFreq(h[arpeggiatingNow].frequency, 1);
       } else {
-        setBuzzer(0, 1);
+        setSynthFreq(0, 1);
       }
     }
   }
 
-  void resetBuzzers() {
-    while (!buzzChQueue.empty()) {
-      buzzChQueue.pop();
+  void resetSynthFreqs() {
+    while (!synthChQueue.empty()) {
+      synthChQueue.pop();
     }
     for (byte i = 0; i < POLYPHONY_LIMIT; i++) {
       synth[i].increment = 0;
       synth[i].counter = 0;
     }
-    if (playbackMode == BUZZ_POLY) {
+    for (byte i = 0; i < LED_COUNT; i++) {
+      h[i].synthCh = 0;
+    }
+    if (playbackMode == SYNTH_POLY) {
       for (byte i = 0; i < POLYPHONY_LIMIT; i++) {
-        buzzChQueue.push(i + 1);
+        synthChQueue.push(i + 1);
       }
     }
   }
@@ -1736,67 +1761,67 @@
     MIDI.sendPitchBend(pbWheel.curValue, 1);
     for (byte i = 0; i < LED_COUNT; i++) {
       if (!(h[i].isCmd)) {
-        if (h[i].buzzCh) {
-          setBuzzer(h[i].frequency,h[i].buzzCh);           // rebuzz all notes if the pitch bend changes
+        if (h[i].synthCh) {
+          setSynthFreq(h[i].frequency,h[i].synthCh);           // pass all notes thru synth again if the pitch bend changes
         }
       }
     }
   }
   
   void trySynthNoteOn(byte x) {
-    if (playbackMode != BUZZ_OFF) {
-      if (playbackMode == BUZZ_POLY) {
+    if (playbackMode != SYNTH_OFF) {
+      if (playbackMode == SYNTH_POLY) {
         // operate independently of MIDI
-        if (buzzChQueue.empty()) {
-          sendToLog("synths all firing, so did not buzz");
+        if (synthChQueue.empty()) {
+          sendToLog("synth channels all firing, so did not add one");
         } else {
-          h[x].buzzCh = buzzChQueue.front();
-          buzzChQueue.pop();
-          sendToLog("popped " + std::to_string(h[x].buzzCh) + " off the synth queue");
-          setBuzzer(h[x].frequency, h[x].buzzCh);
+          h[x].synthCh = synthChQueue.front();
+          synthChQueue.pop();
+          sendToLog("popped " + std::to_string(h[x].synthCh) + " off the synth queue");
+          setSynthFreq(h[x].frequency, h[x].synthCh);
         }
       } else {    
         // operate in lockstep with MIDI
         if (h[x].MIDIch) {
-          replaceBuzzerWith(x);
+          replaceMonoSynthWith(x);
         }
       }
     }
   }
 
   void trySynthNoteOff(byte x) {
-    if (h[x].MIDIch && playbackMode && (playbackMode != BUZZ_POLY)) {
-      replaceBuzzerWith(findNextHeldNote());
+    if (playbackMode && (playbackMode != SYNTH_POLY)) {
+      replaceMonoSynthWith(findNextHeldNote());
     }
-    if (playbackMode == BUZZ_POLY) {
-      if (h[x].buzzCh) {
-        setBuzzer(0, h[x].buzzCh);
-        buzzChQueue.push(h[x].buzzCh);
-        h[x].buzzCh = 0;
+    if (playbackMode == SYNTH_POLY) {
+      if (h[x].synthCh) {
+        setSynthFreq(0, h[x].synthCh);
+        synthChQueue.push(h[x].synthCh);
+        h[x].synthCh = 0;
       }
     }
   }
 
-  void setupPiezo() {
-    gpio_set_function(TONEPIN, GPIO_FUNC_PWM);      // set that pin as PWM
-    pwm_set_phase_correct(TONE_SL, true);           // phase correct sounds better
-    pwm_set_wrap(TONE_SL, 254);                     // 0 - 254 allows 0 - 255 level
-    pwm_set_clkdiv(TONE_SL, 1.0f);                  // run at full clock speed
-    pwm_set_chan_level(TONE_SL, TONE_CH, 0);        // initialize at zero to prevent whining sound
-    pwm_set_enabled(TONE_SL, true);                 // ENGAGE!
+  void setupSynth() {
+    gpio_set_function(PIEZO_PIN, GPIO_FUNC_PWM);      // set that pin as PWM
+    pwm_set_phase_correct(PIEZO_SLICE, true);           // phase correct sounds better
+    pwm_set_wrap(PIEZO_SLICE, 254);                     // 0 - 254 allows 0 - 255 level
+    pwm_set_clkdiv(PIEZO_SLICE, 1.0f);                  // run at full clock speed
+    pwm_set_chan_level(PIEZO_SLICE, PIEZO_CHNL, 0);        // initialize at zero to prevent whining sound
+    pwm_set_enabled(PIEZO_SLICE, true);                 // ENGAGE!
     hw_set_bits(&timer_hw->inte, 1u << ALARM_NUM);  // initialize the timer
     irq_set_exclusive_handler(ALARM_IRQ, poll);     // function to run every interrupt
     irq_set_enabled(ALARM_IRQ, true);               // ENGAGE!
     timer_hw->alarm[ALARM_NUM] = readClock() + POLL_INTERVAL_IN_MICROSECONDS;
-    resetBuzzers();
-    sendToLog("buzzer is ready.");
+    resetSynthFreqs();
+    sendToLog("synth is ready.");
   }
 
   void arpeggiate() {
-    if (playbackMode == BUZZ_ARPEGGIO) {
+    if (playbackMode == SYNTH_ARPEGGIO) {
       if (runTime - arpeggiateTime > arpeggiateLength) {
         arpeggiateTime = runTime;
-        replaceBuzzerWith(findNextHeldNote());
+        replaceMonoSynthWith(findNextHeldNote());
       }
     }
   }
@@ -1871,7 +1896,7 @@
 
   void animateRadial() {
     for (byte i = 0; i < LED_COUNT; i++) {                                // check every hex
-      if (!(h[i].isCmd)) {                                                // that is a note
+      if (!(h[i].isCmd) && (h[i].inScale || !scaleLock)) {                                                // that is a note
         uint64_t radius = animFrame(i);
         if ((radius > 0) && (radius < 16)) {                              // played in the last 16 frames
           byte steps = ((animationType == ANIMATE_SPLASH) ? radius : 1);  // star = 1 step to next corner; ring = 1 step per hex
@@ -2075,8 +2100,8 @@
   GEMPage  menuPageColors("Color options");
   GEMItem  menuGotoColors("Color options", menuPageColors);
   GEMItem  menuColorsBack("<< Back", menuPageMain);
-  GEMPage  menuPageSynth("Buzzer options");
-  GEMItem  menuGotoSynth("Buzzer options", menuPageSynth);
+  GEMPage  menuPageSynth("Synth options");
+  GEMItem  menuGotoSynth("Synth options", menuPageSynth);
   GEMItem  menuSynthBack("<< Back", menuPageMain);
   GEMPage  menuPageControl("Control wheel");
   GEMItem  menuGotoControl("Control wheel", menuPageControl);
@@ -2162,9 +2187,9 @@
   GEMItem  menuItemPBBehave( "Pitch bend", pbSticky, selectWheelType);
   GEMItem  menuItemModBehave( "Mod wheel", modSticky, selectWheelType);
 
-  SelectOptionByte optionBytePlayback[] = { { "Off", BUZZ_OFF }, { "Mono", BUZZ_MONO }, { "Arp'gio", BUZZ_ARPEGGIO }, { "Poly", BUZZ_POLY } };
+  SelectOptionByte optionBytePlayback[] = { { "Off", SYNTH_OFF }, { "Mono", SYNTH_MONO }, { "Arp'gio", SYNTH_ARPEGGIO }, { "Poly", SYNTH_POLY } };
   GEMSelect selectPlayback(sizeof(optionBytePlayback) / sizeof(SelectOptionByte), optionBytePlayback);
-  GEMItem  menuItemPlayback(  "Buzzer:",       playbackMode,  selectPlayback, resetBuzzers);
+  GEMItem  menuItemPlayback(  "Synth mode:",       playbackMode,  selectPlayback, resetSynthFreqs);
 
   // doing this long-hand because the STRUCT has problems accepting string conversions of numbers for some reason
   SelectOptionInt optionIntTransposeSteps[] = {
@@ -2202,10 +2227,10 @@
   GEMSelect selectBright( sizeof(optionByteBright) / sizeof(SelectOptionByte), optionByteBright);
   GEMItem menuItemBright( "Brightness", globalBrightness, selectBright, setLEDcolorCodes);
 
-  SelectOptionByte optionByteWaveform[] = { { "Square", WAVEFORM_SQUARE }, { "Saw", WAVEFORM_SAW },
+  SelectOptionByte optionByteWaveform[] = { { "Hybrid", WAVEFORM_HYBRID }, { "Square", WAVEFORM_SQUARE }, { "Saw", WAVEFORM_SAW },
   {"Triangl", WAVEFORM_TRIANGLE}, {"Sine", WAVEFORM_SINE}, {"Strings", WAVEFORM_STRINGS}, {"Clrinet", WAVEFORM_CLARINET} };
   GEMSelect selectWaveform(sizeof(optionByteWaveform) / sizeof(SelectOptionByte), optionByteWaveform);
-  GEMItem  menuItemWaveform( "Waveform:", currWave, selectWaveform);
+  GEMItem  menuItemWaveform( "Waveform:", currWave, selectWaveform, resetSynthFreqs);
 
   SelectOptionInt optionIntModWheel[] = { { "too slo", 1 }, { "Turtle", 2 }, { "Slow", 4 }, 
     { "Medium",    8 }, { "Fast",     16 }, { "Cheetah",  32 }, { "Instant", 127 } };
@@ -2299,7 +2324,7 @@
     If it's different from the previous one, then
     re-apply the scale to the grid. In any case, go to the
     main menu when done.
-*/
+  */
   void changeScale(GEMCallbackData callbackData) {   // when you change the scale via the menu
     int selection = callbackData.valInt;
     if (selection != current.scaleIndex) {
@@ -2351,6 +2376,7 @@
       showOnlyValidKeyChoices();                           // change list of choices in GEM Menu
       updateLayoutAndRotate();   // apply changes above
       resetTuningMIDI();  // clear out MIDI queue
+      resetSynthFreqs();
     }
     menuHome();
   }
@@ -2539,8 +2565,8 @@
           if (h[i].isCmd) {
             cmdOff(i);
           } else if (h[i].inScale || (!scaleLock)) {
-            trySynthNoteOff(i); // must be done in this order
-            tryMIDInoteOff(i);  // because the last action must be to set the note to have MIDI channel = zero
+            tryMIDInoteOff(i);
+            trySynthNoteOff(i); 
           }
           break;
         case 3: // held
@@ -2642,14 +2668,14 @@
     timeTracker();  // Time tracking functions
     screenSaver();  // Reduces wear-and-tear on OLED panel
     readHexes();       // Read and store the digital button states of the scanning matrix
-    arpeggiate();      // arpeggiate the buzzer
+    arpeggiate();      // arpeggiate if synth mode allows it
     updateWheels();   // deal with the pitch/mod wheel
     animateLEDs();     // deal with animations
     lightUpLEDs();      // refresh LEDs
     dealWithRotary();  // deal with menu
   }
   void setup1() {  // set up on second core
-    setupPiezo();
+    setupSynth();
   }
   void loop1() {  // run on second core
     readKnob();
