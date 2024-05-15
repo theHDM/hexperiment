@@ -1727,7 +1727,7 @@
       if (f < TRANSITION_SQUARE) {
         synth[c].b = 128;
       } else if (f < TRANSITION_SAW_LOW) {
-        synth[c].b = (byte)(128 + 127 * (f - TRANSITION_SQUARE - f) / (TRANSITION_SAW_LOW - TRANSITION_SQUARE));
+        synth[c].b = (byte)(128 + 127 * (f - TRANSITION_SQUARE) / (TRANSITION_SAW_LOW - TRANSITION_SQUARE));
       } else if (f < TRANSITION_SAW_HIGH) {
         synth[c].b = 255;
       } else if (f < TRANSITION_TRIANGLE) {
