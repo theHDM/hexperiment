@@ -1765,9 +1765,11 @@
     return n;
   }
   void replaceMonoSynthWith(byte x) {
+    h[arpeggiatingNow].synthCh = 0;
     if (arpeggiatingNow != x) {
       arpeggiatingNow = x;
       if (arpeggiatingNow != UNUSED_NOTE) {
+        h[arpeggiatingNow].synthCh = 1;
         setSynthFreq(h[arpeggiatingNow].frequency, 1);
       } else {
         setSynthFreq(0, 1);
