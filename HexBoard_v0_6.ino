@@ -1368,27 +1368,24 @@
   }
 
   void resetTuningMIDI() {
-    // currently the only way that microtonal
-    // MIDI works is via MPE (MIDI polyphonic expression).
-    // This assigns re-tuned notes to an independent channel
-    // so they can be pitched separately.
-    //
-    // if operating in a standard 12-EDO tuning, or in a
-    // tuning with steps that are all exact multiples of
-    // 100 cents, then MPE is not necessary.
-    //
-    // otherwise, determine how many different channels are
-    // required to fully realize this tuning. if this is a
-    // non-octave tuning like Carlos or BP, we should just
-    // assume this number is unbounded. Otherwise, for
-    // N-EDO the number is N divided by GCD(N,12).
-    //
+    /*
+      currently the only way that microtonal
+      MIDI works is via MPE (MIDI polyphonic expression).
+      This assigns re-tuned notes to an independent channel
+      so they can be pitched separately.
+    
+      if operating in a standard 12-EDO tuning, or in a
+      tuning with steps that are all exact multiples of
+      100 cents, then MPE is not necessary.
+    */
     if (current.tuning().stepSize == 100.0) {
       MPEpitchBendsNeeded = 1;
-    } else if (round(current.tuning().cycleLength * current.tuning().stepSize) != 1200) {
-      MPEpitchBendsNeeded = 255;
-    } else {
+    /*  this was an attempt to allow unlimited polyphony for certain EDOs. doesn't work in Logic Pro.
+    } else if (round(current.tuning().cycleLength * current.tuning().stepSize) == 1200) {
       MPEpitchBendsNeeded = current.tuning().cycleLength / std::gcd(12, current.tuning().cycleLength);
+    */
+    } else {
+      MPEpitchBendsNeeded = 255;
     }
     if (MPEpitchBendsNeeded > 15) {
       setMPEzone(1, 15);   // MPE zone 1 = ch 2 thru 16
