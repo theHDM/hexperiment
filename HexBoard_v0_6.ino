@@ -61,7 +61,7 @@
     the code into a library at that point.
   */
 // @init
-  #define HARDWARE_VERSION 2      // 1 = v1.1 board. 2 = v1.2 board.
+  #define HARDWARE_VERSION 1      // 1 = v1.1 board. 2 = v1.2 board.
   #include <Arduino.h>            // this is necessary to talk to the Hexboard!
   #include <Wire.h>               // this is necessary to deal with the pins and wires
   #define SDAPIN 16
@@ -1560,8 +1560,10 @@
     at different frequencies. Said frequencies
     are controlled via constants here.
   */
-    #define TRANSITION_SQUARE   220.0
-    #define TRANSITION_TRIANGLE 880.0
+    #define TRANSITION_SQUARE    220.0
+    #define TRANSITION_SAW_LOW   440.0
+    #define TRANSITION_SAW_HIGH  880.0
+    #define TRANSITION_TRIANGLE 1760.0
   /*
     The poll interval represents how often a
     new sample value is emulated on the PWM
@@ -1628,7 +1630,11 @@
   public:
     uint16_t increment = 0;
     uint16_t counter = 0;
-    byte wave = currWave;
+    byte a = 127;
+    byte b = 128;
+    byte c = 255;
+    uint16_t ab = 0;
+    uint16_t cd = 0;
     byte eq = 0;
   };
   oscillator synth[POLYPHONY_LIMIT];          // maximum polyphony
@@ -1646,18 +1652,29 @@
     uint32_t mix = 0;
     byte voices = POLYPHONY_LIMIT;
     uint16_t p;
+    byte t;
     byte level = 0;
     for (byte i = 0; i < POLYPHONY_LIMIT; i++) {
       if (synth[i].increment) {
         synth[i].counter += synth[i].increment; // should loop from 65536 -> 0        
         p = synth[i].counter;
+        t = p >> 8;
         switch (synth[i].wave) {
           case WAVEFORM_SAW:                                                            break;
           case WAVEFORM_TRIANGLE: p = 2 * ((p >> 15) ? p : (65535 - p));                break;
           case WAVEFORM_SQUARE:   p = 0 - (p > (32768 - modWheel.curValue * 7 * 16));   break;
-          case WAVEFORM_SINE:     p = sine[p >> 8] << 8;             break;
-          case WAVEFORM_STRINGS:  p = strings[p >> 8] << 8;          break;
-          case WAVEFORM_CLARINET: p = clarinet[p >> 8] << 8;         break;
+          case WAVEFORM_HYBRID:   if (t <= synth[i].a) {
+                                    p = 0;
+                                  } else if (t < synth[i].b) {
+                                    p = (t - synth[i].a) * synth[i].ab;
+                                  } else if (t <= synth[i].c) {
+                                    p = 65535;
+                                  } else {
+                                    p = (256 - t) * synth[i].cd;
+                                  };                                                  break;
+          case WAVEFORM_SINE:     p = sine[t] << 8;                                   break;
+          case WAVEFORM_STRINGS:  p = strings[t] << 8;                                break;
+          case WAVEFORM_CLARINET: p = clarinet[t] << 8;                               break;
           default:                                                                  break;
         }
         mix += (p * synth[i].eq);  // P[16bit] * EQ[3bit] =[19bit]
@@ -1706,12 +1723,31 @@
     synth[c].counter = 0;
     synth[c].increment = round(f * POLL_INTERVAL_IN_MICROSECONDS * 0.065536);   // cycle 0-65535 at resultant frequency
     synth[c].eq = isoTwoTwentySix(f);
-    synth[c].wave = currWave;
     if (currWave == WAVEFORM_HYBRID) {
-      if (f < TRANSITION_SQUARE) {          synth[c].wave = WAVEFORM_SQUARE;
-      } else if (f < TRANSITION_TRIANGLE) { synth[c].wave = WAVEFORM_SAW;
-      } else {                              synth[c].wave = WAVEFORM_TRIANGLE;
+      if (f < TRANSITION_SQUARE) {
+        synth[c].b = 128;
+      } else if (f < TRANSITION_SAW_LOW) {
+        synth[c].b = (byte)(128 + 127 * (f - TRANSITION_SQUARE - f) / (TRANSITION_SAW_LOW - TRANSITION_SQUARE));
+      } else if (f < TRANSITION_SAW_HIGH) {
+        synth[c].b = 255;
+      } else if (f < TRANSITION_TRIANGLE) {
+        synth[c].b = (byte)(127 + 128 * (TRANSITION_TRIANGLE - f) / (TRANSITION_TRIANGLE - TRANSITION_SAW_HIGH));
+      } else {
+        synth[c].b = 127;
       }
+      if (f < TRANSITION_SAW_LOW) {
+        synth[c].a = 255 - synth[c].b;
+        synth[c].c = 255;
+      } else {
+        synth[c].a = 0;
+        synth[c].c = synth[c].b;
+      }
+      if (synth[c].a > 126) {
+        synth[c].ab = 65535;
+      } else {
+        synth[c].ab = 65535 / (synth[c].b - synth[c].a - 1);
+      }
+      synth[c].cd = 65535 / (256 - synth[c].c);
     }
   }
 
