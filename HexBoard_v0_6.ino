@@ -1766,14 +1766,12 @@
   }
   void replaceMonoSynthWith(byte x) {
     h[arpeggiatingNow].synthCh = 0;
-    if (arpeggiatingNow != x) {
-      arpeggiatingNow = x;
-      if (arpeggiatingNow != UNUSED_NOTE) {
-        h[arpeggiatingNow].synthCh = 1;
-        setSynthFreq(h[arpeggiatingNow].frequency, 1);
-      } else {
-        setSynthFreq(0, 1);
-      }
+    arpeggiatingNow = x;
+    if (arpeggiatingNow != UNUSED_NOTE) {
+      h[arpeggiatingNow].synthCh = 1;
+      setSynthFreq(h[arpeggiatingNow].frequency, 1);
+    } else {
+      setSynthFreq(0, 1);
     }
   }
 
@@ -1795,7 +1793,7 @@
     }
   }
   
-  void updateSynthWhenPitchBend() {
+  void updateSynthWithNewFreqs() {
     MIDI.sendPitchBend(pbWheel.curValue, 1);
     for (byte i = 0; i < LED_COUNT; i++) {
       if (!(h[i].isCmd)) {
@@ -2147,7 +2145,7 @@
   GEMPage  menuPageTesting("Advanced");
   GEMItem  menuGotoTesting("Advanced", menuPageTesting);
   GEMItem  menuTestingBack("<< Back", menuPageMain);
-  GEMPage  menuPageReboot("Ready to flash! Plug into PC");
+  GEMPage  menuPageReboot("Ready to flash firmware!");
   /*
     We haven't written the code for some procedures,
     but the menu item needs to know the address
@@ -2395,6 +2393,7 @@
   void changeTranspose() {     // when you change the transpose via the menu
     current.transpose = transposeSteps;
     assignPitches();
+    updateSynthWithNewFreqs();
   }
   /*
     This procedure is run when the tuning is changed via the menu.
@@ -2625,7 +2624,7 @@
       upd = pbWheel.updateValue(runTime);
       if (upd) {
         sendMIDIpitchBendToCh1();
-        updateSynthWhenPitchBend();
+        updateSynthWithNewFreqs();
       }
     } else {
       modWheel.setTargetValue();
