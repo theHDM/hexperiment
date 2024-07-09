@@ -3,7 +3,6 @@
     HexBoard
     Copyright 2022-2023 Jared DeCook and Zach DeCook
     with help from Nicholas Fox
-    Firmware v0.6.prerelease 2024-05-14
     Licensed under the GNU GPL Version 3.
 
     Hardware information:
@@ -61,7 +60,6 @@
     the code into a library at that point.
   */
 // @init
-  #define HARDWARE_VERSION 1      // 1 = v1.1 board. 2 = v1.2 board.
   #include <Arduino.h>            // this is necessary to talk to the Hexboard!
   #include <Wire.h>               // this is necessary to deal with the pins and wires
   #define SDAPIN 16
@@ -70,6 +68,11 @@
   #include <numeric>              // need that GCD function, son
   #include <string>               // standard C++ library string classes (use "std::string" to invoke it); these do not cause the memory corruption that Arduino::String does.
   #include <queue>                // standard C++ library construction to store open channels in microtonal mode (use "std::queue" to invoke it)
+// Software-detected hardware revision
+  #define HARDWARE_UNKNOWN 0
+  #define HARDWARE_V1_1 1
+  #define HARDWARE_V1_2 2
+  byte Hardware_Version = 0;       // 0 = unknown, 1 = v1.1 board. 2 = v1.2 board.
 // @helpers
   /*
     C++ returns a negative value for 
@@ -108,7 +111,7 @@
   byte animationFPS = 32;             // actually frames per 2^20 microseconds. close enough to 30fps
 
   byte wheelMode = 0;                 // standard vs. fine tune mode
-  byte modSticky = 1;
+  byte modSticky = 0;
   byte pbSticky = 0;
   byte velSticky = 1;
   int modWheelSpeed = 8;
@@ -148,6 +151,8 @@
   #define BRIGHT_MID 180
   #define BRIGHT_LOW 150
   #define BRIGHT_DIM 110
+  #define BRIGHT_DIMMER 50
+  #define BRIGHT_OFF 0
   byte globalBrightness = BRIGHT_MID;
 
 // @microtonal
@@ -921,7 +926,8 @@
   */
   #define LED_COUNT 140
   #define COLCOUNT 10
-  #define ROWCOUNT 14
+  #define ROWCOUNT 16
+  #define BTN_COUNT COLCOUNT*ROWCOUNT
   /*
     Of the 140 buttons, 7 are offset to the bottom left
     quadrant of the Hexboard and are reserved as command
@@ -956,6 +962,10 @@
   */
   class buttonDef {
   public:
+    #define BTN_STATE_OFF 0
+    #define BTN_STATE_NEWPRESS 1
+    #define BTN_STATE_RELEASED 2
+    #define BTN_STATE_HELD 3
     byte     btnState = 0;        // binary 00 = off, 01 = just pressed, 10 = just released, 11 = held
     void interpBtnPress(bool isPress) {
       btnState = (((btnState << 1) + isPress) & 3);
@@ -1076,7 +1086,7 @@
     buttons from 0 to 139. h[i] refers to the 
     button with the LED address = i.
   */
-  buttonDef h[LED_COUNT];        
+  buttonDef h[BTN_COUNT];
   
   wheelDef modWheel = { &wheelMode, &modSticky,
     &h[assignCmd[4]].btnState, &h[assignCmd[5]].btnState, &h[assignCmd[6]].btnState,
@@ -1104,7 +1114,7 @@
   }
 
   void setupGrid() {
-    for (byte i = 0; i < LED_COUNT; i++) {
+    for (byte i = 0; i < BTN_COUNT; i++) {
       h[i].coordRow = (i / 10);
       h[i].coordCol = (2 * (i % 10)) + (h[i].coordRow & 1);
       h[i].isCmd = 0;
@@ -1115,6 +1125,12 @@
       h[assignCmd[c]].isCmd = 1;
       h[assignCmd[c]].note = CMDB + c;
     }
+    // "flag" buttons
+    for (byte i = 140; i < BTN_COUNT; i++) {
+      h[i].isCmd = 1;
+    }
+    // On version 1.2, "button" 140 is shorted (always connected)
+    h[140].note = HARDWARE_V1_2;
   }
 
 // @LED
@@ -1332,24 +1348,42 @@
     and attach usb_midi as the transport.
   */
   Adafruit_USBD_MIDI usb_midi;
-  MIDI_CREATE_INSTANCE(Adafruit_USBD_MIDI, usb_midi, MIDI);
+  MIDI_CREATE_INSTANCE(Adafruit_USBD_MIDI, usb_midi, UMIDI);
+  MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, SMIDI);
+  // midiD takes the following bitwise flags
+  #define MIDID_NONE 0
+  #define MIDID_USB 1
+  #define MIDID_SER 2
+  #define MIDID_BOTH 3
+  byte midiD = MIDID_USB | MIDID_SER;
+
+  // What program change number we last sent (General MIDI/Roland MT-32)
+  byte programChange = 0;
+
   std::queue<byte> MPEchQueue;
   byte MPEpitchBendsNeeded; 
 
   float freqToMIDI(float Hz) {             // formula to convert from Hz to MIDI note
     return 69.0 + 12.0 * log2f(Hz / 440.0);
   }
-  float MIDItoFreq(float MIDI) {           // formula to convert from MIDI note to Hz
-    return 440.0 * exp2((MIDI - 69.0) / 12.0);
+  float MIDItoFreq(float midi) {           // formula to convert from MIDI note to Hz
+    return 440.0 * exp2((midi - 69.0) / 12.0);
   }
   float stepsToMIDI(int16_t stepsFromA) {  // return the MIDI pitch associated
     return freqToMIDI(CONCERT_A_HZ) + ((float)stepsFromA * (float)current.tuning().stepSize / 100.0);
   }
 
   void setPitchBendRange(byte Ch, byte semitones) {
-    MIDI.beginRpn(0, Ch);
-    MIDI.sendRpnValue(semitones << 7, Ch);
-    MIDI.endRpn(Ch);
+    if (midiD&MIDID_USB) {
+        UMIDI.beginRpn(0, Ch);
+        UMIDI.sendRpnValue(semitones << 7, Ch);
+        UMIDI.endRpn(Ch);
+    }
+    if (midiD&MIDID_SER) {
+        SMIDI.beginRpn(0, Ch);
+        SMIDI.sendRpnValue(semitones << 7, Ch);
+        SMIDI.endRpn(Ch);
+    }
     sendToLog(
       "set pitch bend range on ch " +
       std::to_string(Ch) + " to be " + 
@@ -1358,9 +1392,16 @@
   }
 
   void setMPEzone(byte masterCh, byte sizeOfZone) {
-    MIDI.beginRpn(6, masterCh);
-    MIDI.sendRpnValue(sizeOfZone << 7, masterCh);
-    MIDI.endRpn(masterCh);
+    if (midiD&MIDID_USB) {
+        UMIDI.beginRpn(6, masterCh);
+        UMIDI.sendRpnValue(sizeOfZone << 7, masterCh);
+        UMIDI.endRpn(masterCh);
+    }
+    if (midiD&MIDID_SER) {
+        SMIDI.beginRpn(6, masterCh);
+        SMIDI.sendRpnValue(sizeOfZone << 7, masterCh);
+        SMIDI.endRpn(masterCh);
+    }
     sendToLog(
       "tried sending MIDI msg to set MPE zone, master ch " +
       std::to_string(masterCh) + ", zone of this size: " + std::to_string(sizeOfZone)
@@ -1401,18 +1442,21 @@
     }
     // force pitch bend back to the expected range of 2 semitones.
     for (byte i = 1; i <= 16; i++) {
-      MIDI.sendControlChange(123, 0, i);
+      if(midiD&MIDID_USB)UMIDI.sendControlChange(123, 0, i);
+      if(midiD&MIDID_SER)SMIDI.sendControlChange(123, 0, i);
       setPitchBendRange(i, PITCH_BEND_SEMIS);   
     }
   }
 
   void sendMIDImodulationToCh1() {
-    MIDI.sendControlChange(1, modWheel.curValue, 1);
+    if(midiD&MIDID_USB)UMIDI.sendControlChange(1, modWheel.curValue, 1);
+    if(midiD&MIDID_SER)SMIDI.sendControlChange(1, modWheel.curValue, 1);
     sendToLog("sent mod value " + std::to_string(modWheel.curValue) + " to ch 1");
   }
 
   void sendMIDIpitchBendToCh1() {
-    MIDI.sendPitchBend(pbWheel.curValue, 1);
+    if(midiD&MIDID_USB)UMIDI.sendPitchBend(pbWheel.curValue, 1);
+    if(midiD&MIDID_SER)SMIDI.sendPitchBend(pbWheel.curValue, 1);
     sendToLog("sent pb wheel value " + std::to_string(pbWheel.curValue) + " to ch 1");
   }
   
@@ -1434,8 +1478,11 @@
         }
       }
       if (h[x].MIDIch) {
-        MIDI.sendNoteOn(h[x].note, velWheel.curValue, h[x].MIDIch); // ch 1-16
-        MIDI.sendPitchBend(h[x].bend, h[x].MIDIch); // ch 1-16
+        if(midiD&MIDID_USB)UMIDI.sendNoteOn(h[x].note, velWheel.curValue, h[x].MIDIch); // ch 1-16
+        if(midiD&MIDID_SER)SMIDI.sendNoteOn(h[x].note, velWheel.curValue, h[x].MIDIch); // ch 1-16
+
+        if(midiD&MIDID_USB)UMIDI.sendPitchBend(h[x].bend, h[x].MIDIch); // ch 1-16
+        if(midiD&MIDID_SER)SMIDI.sendPitchBend(h[x].bend, h[x].MIDIch); // ch 1-16
         sendToLog(
           "sent MIDI noteOn: " + std::to_string(h[x].note) +
           " pb "  + std::to_string(h[x].bend) +
@@ -1450,7 +1497,8 @@
     // this gets called on any non-command hex
     // that is not scale-locked.
     if (h[x].MIDIch) {    // but just in case, check
-      MIDI.sendNoteOff(h[x].note, velWheel.curValue, h[x].MIDIch);    
+      if(midiD&MIDID_USB)UMIDI.sendNoteOff(h[x].note, velWheel.curValue, h[x].MIDIch);
+      if(midiD&MIDID_SER)SMIDI.sendNoteOff(h[x].note, velWheel.curValue, h[x].MIDIch);
       sendToLog(
         "sent note off: " + std::to_string(h[x].note) +
         " pb " + std::to_string(h[x].bend) +
@@ -1467,7 +1515,8 @@
 
   void setupMIDI() {
     usb_midi.setStringDescriptor("HexBoard MIDI");  // Initialize MIDI, and listen to all MIDI channels
-    MIDI.begin(MIDI_CHANNEL_OMNI);                  // This will also call usb_midi's begin()
+    UMIDI.begin(MIDI_CHANNEL_OMNI);                 // This will also call usb_midi's begin()
+    SMIDI.begin(MIDI_CHANNEL_OMNI);
     resetTuningMIDI();
     sendToLog("setupMIDI okay");
   }
@@ -1489,9 +1538,15 @@
   #define PIEZO_PIN 23
   #define PIEZO_SLICE 3
   #define PIEZO_CHNL 1
-  #define AUDIO_PIN 25
-  #define AUDIO_SLICE 4
-  #define AUDIO_CHNL 1
+  #define AJACK_PIN 25
+  #define AJACK_SLICE 4
+  #define AJACK_CHNL 1
+  // midiD takes the following bitwise flags
+  #define AUDIO_NONE 0
+  #define AUDIO_PIEZO 1
+  #define AUDIO_AJACK 2
+  #define AUDIO_BOTH 3
+  byte audioD = AUDIO_PIEZO | AUDIO_AJACK;
   /*
     These definitions provide 8-bit samples to emulate.
     You can add your own as desired; it must
@@ -1643,7 +1698,7 @@
 
   byte arpeggiatingNow = UNUSED_NOTE;         // if this is 255, set to off (0% duty cycle)
   uint64_t arpeggiateTime = 0;                // Used to keep track of when this note started playing in ARPEG mode
-  uint64_t arpeggiateLength = 65'536;         // in microseconds. approx a 1/32 note at 114 BPM
+  uint64_t arpeggiateLength = 65536;         // in microseconds. approx a 1/32 note at 114 BPM
 
   // RUN ON CORE 2
   void poll() {
@@ -1685,7 +1740,8 @@
     mix *= attenuation[(playbackMode == SYNTH_POLY) * voices]; // [19bit]*atten[6bit] = [25bit]
     mix *= velWheel.curValue; // [25bit]*vel[7bit]=[32bit], poly+ 
     level = mix >> 24;  // [32bit] - [8bit] = [24bit]
-    pwm_set_chan_level(PIEZO_SLICE, PIEZO_CHNL, level);
+    if(audioD&AUDIO_PIEZO)pwm_set_chan_level(PIEZO_SLICE, PIEZO_CHNL, level);
+    if(audioD&AUDIO_AJACK)pwm_set_chan_level(AJACK_SLICE, AJACK_CHNL, level);
   }
   // RUN ON CORE 1
   byte isoTwoTwentySix(float f) {
@@ -1755,8 +1811,8 @@
 
   byte findNextHeldNote() {
     byte n = UNUSED_NOTE;
-    for (byte i = 1; i <= LED_COUNT; i++) {
-      byte j = positiveMod(arpeggiatingNow + i, LED_COUNT);
+    for (byte i = 1; i <= BTN_COUNT; i++) {
+      byte j = positiveMod(arpeggiatingNow + i, BTN_COUNT);
       if ((h[j].MIDIch) && (!h[j].isCmd)) {
         n = j;
         break;
@@ -1765,6 +1821,7 @@
     return n;
   }
   void replaceMonoSynthWith(byte x) {
+    if (arpeggiatingNow == x) return;
     h[arpeggiatingNow].synthCh = 0;
     arpeggiatingNow = x;
     if (arpeggiatingNow != UNUSED_NOTE) {
@@ -1783,7 +1840,7 @@
       synth[i].increment = 0;
       synth[i].counter = 0;
     }
-    for (byte i = 0; i < LED_COUNT; i++) {
+    for (byte i = 0; i < BTN_COUNT; i++) {
       h[i].synthCh = 0;
     }
     if (playbackMode == SYNTH_POLY) {
@@ -1792,10 +1849,15 @@
       }
     }
   }
+  void sendProgramChange() {
+    if(midiD&MIDID_USB)UMIDI.sendProgramChange(programChange - 1, 1);
+    if(midiD&MIDID_SER)SMIDI.sendProgramChange(programChange - 1, 1);
+  }
   
   void updateSynthWithNewFreqs() {
-    MIDI.sendPitchBend(pbWheel.curValue, 1);
-    for (byte i = 0; i < LED_COUNT; i++) {
+    if(midiD&MIDID_USB)UMIDI.sendPitchBend(pbWheel.curValue, 1);
+    if(midiD&MIDID_SER)SMIDI.sendPitchBend(pbWheel.curValue, 1);
+    for (byte i = 0; i < BTN_COUNT; i++) {
       if (!(h[i].isCmd)) {
         if (h[i].synthCh) {
           setSynthFreq(h[i].frequency,h[i].synthCh);           // pass all notes thru synth again if the pitch bend changes
@@ -1827,7 +1889,9 @@
 
   void trySynthNoteOff(byte x) {
     if (playbackMode && (playbackMode != SYNTH_POLY)) {
-      replaceMonoSynthWith(findNextHeldNote());
+      if (arpeggiatingNow == x) {
+        replaceMonoSynthWith(findNextHeldNote());
+      }
     }
     if (playbackMode == SYNTH_POLY) {
       if (h[x].synthCh) {
@@ -1838,13 +1902,13 @@
     }
   }
 
-  void setupSynth() {
-    gpio_set_function(PIEZO_PIN, GPIO_FUNC_PWM);      // set that pin as PWM
-    pwm_set_phase_correct(PIEZO_SLICE, true);           // phase correct sounds better
-    pwm_set_wrap(PIEZO_SLICE, 254);                     // 0 - 254 allows 0 - 255 level
-    pwm_set_clkdiv(PIEZO_SLICE, 1.0f);                  // run at full clock speed
-    pwm_set_chan_level(PIEZO_SLICE, PIEZO_CHNL, 0);        // initialize at zero to prevent whining sound
-    pwm_set_enabled(PIEZO_SLICE, true);                 // ENGAGE!
+  void setupSynth(byte pin, byte slice) {
+    gpio_set_function(pin, GPIO_FUNC_PWM);      // set that pin as PWM
+    pwm_set_phase_correct(slice, true);           // phase correct sounds better
+    pwm_set_wrap(slice, 254);                     // 0 - 254 allows 0 - 255 level
+    pwm_set_clkdiv(slice, 1.0f);                  // run at full clock speed
+    pwm_set_chan_level(slice, PIEZO_CHNL, 0);        // initialize at zero to prevent whining sound
+    pwm_set_enabled(slice, true);                 // ENGAGE!
     hw_set_bits(&timer_hw->inte, 1u << ALARM_NUM);  // initialize the timer
     irq_set_exclusive_handler(ALARM_IRQ, poll);     // function to run every interrupt
     irq_set_enabled(ALARM_IRQ, true);               // ENGAGE!
@@ -2069,6 +2133,10 @@
       case CMDB + 3:
         toggleWheel = !toggleWheel;
         break;
+      case HARDWARE_V1_2:
+        Hardware_Version = h[x].note;
+        setupHardware();
+        break;
       default:
         // the rest should all be taken care of within the wheelDef structure
         break;
@@ -2125,8 +2193,8 @@
   */
   GEMPage  menuPageMain("HexBoard MIDI Controller");
   GEMPage  menuPageTuning("Tuning");
-  GEMItem  menuTuningBack("<< Back", menuPageMain);
   GEMItem  menuGotoTuning("Tuning", menuPageTuning);
+  GEMItem  menuTuningBack("<< Back", menuPageMain);
   GEMPage  menuPageLayout("Layout");
   GEMItem  menuGotoLayout("Layout", menuPageLayout); 
   GEMItem  menuLayoutBack("<< Back", menuPageMain);
@@ -2162,7 +2230,13 @@
     To be honest I don't know how to get just a plain text line to show here other than this!
   */
   void fakeButton() {}
-  GEMItem  menuItemVersion("v0.6.0", fakeButton);
+  GEMItem  menuItemVersion("v1.0.1", fakeButton);
+  SelectOptionByte optionByteHardware[] =  {
+    { "V1.1", HARDWARE_UNKNOWN }, { "V1.1" , HARDWARE_V1_1 },
+    { "V1.2", HARDWARE_V1_2 }
+  };
+  GEMSelect selectHardware( sizeof(optionByteHardware)  / sizeof(SelectOptionByte), optionByteHardware);
+  GEMItem  menuItemHardware("HexBoard", Hardware_Version, selectHardware, GEM_READONLY);
   /*
     This GEMItem runs a given procedure when you select it.
     We must declare or define that procedure first.
@@ -2227,6 +2301,129 @@
   GEMSelect selectPlayback(sizeof(optionBytePlayback) / sizeof(SelectOptionByte), optionBytePlayback);
   GEMItem  menuItemPlayback(  "Synth mode:",       playbackMode,  selectPlayback, resetSynthFreqs);
 
+  // Hardware V1.2-only
+  SelectOptionByte optionByteAudioD[] =  {
+    { "Buzzer", AUDIO_PIEZO }, { "Jack" , AUDIO_AJACK }, { "Both", AUDIO_BOTH }
+  };
+  GEMSelect selectAudioD( sizeof(optionByteAudioD)  / sizeof(SelectOptionByte), optionByteAudioD);
+  GEMItem  menuItemAudioD("SynthOutput:", audioD, selectAudioD);
+
+  // Roland MT-32 mode (1987)
+  SelectOptionByte optionByteRolandMT32[] = {
+    // Piano
+    {"APiano1",  1}, {"APiano2",  2}, {"APiano3",  3},
+    {"EPiano1",  4}, {"EPiano2",  5}, {"EPiano3",  6}, {"EPiano4",  7},
+    {"HonkyTonk",8},
+    // Organ
+    {"EOrgan1",  9}, {"EOrgan2", 10}, {"EOrgan3", 11}, {"EOrgan4", 12},
+    {"POrgan2", 13}, {"POrgan3", 14}, {"POrgan4", 15},
+    {"Accordion",16},
+    // Keybrd
+    {"Harpsi1", 17}, {"Harpsi2", 18}, {"Harpsi3", 19},
+    {"Clavi 1", 20}, {"Clavi 2", 21}, {"Clavi 3", 22},
+    {"Celesta", 23}, {"Celest2", 24},
+    // S Brass
+    {"SBrass1", 25}, {"SBrass2", 26}, {"SBrass3", 27}, {"SBrass4", 28},
+    // SynBass
+    {"SynBass", 29}, {"SynBas2", 30}, {"SynBas3", 31}, {"SynBas4", 32},
+    // Synth 1
+    {"Fantasy", 33}, {"HarmoPan",34}, {"Chorale", 35}, {"Glasses", 36},
+    {"Soundtrack",37},{"Atmosphere",38},{"WarmBell",39},{"FunnyVox",40},
+    // Synth 2
+    {"EchoBell",41}, {"IceRain", 42}, {"Oboe2K1", 43}, {"EchoPan", 44},
+    {"Dr.Solo", 45}, {"SchoolDaze",46},{"BellSinger",47},{"SquareWave",48},
+    // Strings
+    {"StrSec1", 49}, {"StrSec2", 50}, {"StrSec3", 51}, {"Pizzicato", 52},
+    {"Violin1", 53}, {"Violin2", 54}, {"Cello 1", 55}, {"Cello 2", 56},
+    {"ContraBass",57}, {"Harp  1", 58}, {"Harp  2", 59},
+    // Guitar
+    {"Guitar1", 60}, {"Guitar2", 61}, {"EGuitr1", 62}, {"EGuitr2", 63},
+    {"Sitar", 64},
+    // Bass
+    {"ABass 1", 65}, {"ABass 2", 66}, {"EBass 1", 67}, {"EBass 2", 68},
+    {"SlapBass", 69},{"SlapBa2", 70}, {"Fretless", 71},{"Fretle2", 72},
+    // Wind
+    {"Flute 1", 73}, {"Flute 2", 74}, {"Piccolo", 75}, {"Piccol2", 76},
+    {"Recorder",77}, {"PanPipes",78},
+    {"Sax   1", 79}, {"Sax   2", 80}, {"Sax   3", 81}, {"Sax   4", 82},
+    {"Clarinet",83}, {"Clarin2", 84}, {"Oboe",    85}, {"EnglHorn", 86},
+    {"Bassoon", 87}, {"Harmonica",88},
+    // Brass
+    {"Trumpet", 89}, {"Trumpe2", 90}, {"Trombone",91}, {"Trombo2", 92},
+    {"FrHorn1", 93}, {"FrHorn2", 94},
+    {"Tuba", 95},    {"BrsSect", 96}, {"BrsSec2", 97},
+    // Mallet
+    {"Vibe  1", 98}, {"Vibe  2", 99},
+    {"SynMallet",100}, {"WindBell",101}, {"Glock",102}, {"TubeBell",103}, {"XyloPhone",104}, {"Marimba",105},
+    // Special
+    {"Koto", 106}, {"Sho", 107}, {"Shakuhachi",108},
+    {"Whistle",109}, {"Whistl2",110}, {"BottleBlow",111},{"BreathPipe",112},
+    // Percussion
+    {"Timpani",113}, {"MelTom", 114}, {"DeepSnare",115},
+    {"ElPerc1",116}, {"ElPerc2",117}, {"Taiko",  118}, {"TaikoRim",119},
+    {"Cymbal",120}, {"Castanets",121}, {"Triangle",122},
+    // Effects
+    {"OrchHit",123}, {"Telephone",124}, {"BirdTweet",125}, {"1NoteJam",126}, {"WaterBells",127}, {"JungleTune",128},
+  };
+  GEMSelect selectRolandMT32(sizeof(optionByteRolandMT32) / sizeof(SelectOptionByte), optionByteRolandMT32);
+  GEMItem  menuItemRolandMT32("RolandMT32:", programChange,  selectRolandMT32, sendProgramChange);
+
+  // General MIDI 1
+  SelectOptionByte optionByteGeneralMidi[] = {
+    // Piano
+    {"Piano 1", 1}, {"Piano 2", 2}, {"Piano 3", 3}, {"HonkyTonk", 4},
+    {"EPiano1", 5}, {"EPiano2", 6}, {"HarpsiChord", 7}, {"Clavinet", 8},
+    // Chromatic Percussion
+    {"Celesta", 9},  {"Glockenspiel", 10}, {"MusicBox", 11}, {"Vibraphone", 12},
+    {"Marimba", 13}, {"Xylophone", 14}, {"TubeBells", 15}, {"Dulcimer", 16},
+    // Organ
+    {"Organ 1", 17}, {"Organ 2", 18}, {"Organ 3", 19}, {"ChurchOrgan", 20},
+    {"ReedOrgan", 21}, {"Accordion", 22}, {"Harmonica", 23}, {"Bandoneon", 24},
+    // Guitar
+    {"AGtrNylon", 25}, {"AGtrSteel", 26},
+    {"EGtrJazz", 27}, {"EGtrClean", 28}, {"EGtrMuted", 29},
+    {"EGtrOverdrive", 30}, {"EGtrDistortion", 31}, {"EGtrHarmonics", 32},
+    // Bass
+    {"ABass", 33}, {"EBasFinger", 34}, {"EBasPicked", 35}, {"EBasFretless", 36},
+    {"SlpBass1", 37}, {"SlpBas2", 38}, {"SynBas1", 39}, {"SynBas2", 40},
+    // Strings
+    {"Violin", 41}, {"Viola", 42}, {"Cello", 43}, {"ContraBass", 44},
+    {"TremoloStrings", 45}, {"PizzicatoStrings", 46}, {"OrchHarp", 47}, {"Timpani", 48},
+    // Ensemble
+    {"StrEns1", 49}, {"StrEns2", 50}, {"SynStr1", 51}, {"SynStr2", 52},
+    {"ChoirAahs", 53}, {"VoiceOohs", 54}, {"SynVoice", 55}, {"OrchHit", 56},
+    // Brass
+    {"Trumpet", 57}, {"Trombone", 58}, {"Tuba", 59}, {"MutedTrumpet", 60},
+    {"FrenchHorn", 61}, {"BrassSection", 62}, {"SynBrs1", 63}, {"SynBrs2", 64},
+    // Reed
+    {"Sop Sax", 65}, {"AltoSax", 66}, {"Ten Sax", 67}, {"BariSax", 68},
+    {"Oboe", 69}, {"EnglHorn", 70}, {"Bassoon", 71}, {"Clarinet", 72},
+    // Pipe
+    {"Piccolo", 73}, {"Flute", 74}, {"Recorder", 75}, {"PanFlute", 76},
+    {"BlownBottle", 77}, {"Shakuhachi", 78}, {"Whistle", 79}, {"Ocarina", 80},
+    // Synth Lead
+    {"Ld1Square", 81}, {"Ld2Sawtooth", 82}, {"Ld3Calliope", 83}, {"Ld4Chiff", 84},
+    {"Ld5Charang", 85}, {"Ld6Voice", 86}, {"Ld7Fifths", 87}, {"Ld8Bass&Lead", 88},
+    // Synth Pad
+    {"Pd1NewAge", 89}, {"Pd2Warm", 90}, {"Pd3Polysynth", 91}, {"Pd4Choir", 92},
+    {"Pd5BowedGlass", 93}, {"Pd6Metallic", 94}, {"Pd7Halo", 95}, {"Pd8Sweep", 96},
+     // Synth Effects
+    {"FX1Rain", 97}, {"FX2Soundtrack", 98}, {"FX3Crystal", 99}, {"FX4Atmosphere", 100},
+    {"FX5Bright", 101}, {"FX6Goblins", 102}, {"FX7Echoes", 103}, {"FX8SciFi)", 104},
+    // Ethnic
+    {"Sitar", 105}, {"Banjo", 106}, {"Shamisen", 107}, {"Koto", 108},
+    {"Kalimba", 109}, {"BagPipe", 110}, {"Fiddle", 111}, {"Shanai", 112},
+    // Percussive
+    {"TinkleBell", 113}, {"Cowbell", 114}, {"SteelDrums", 115}, {"WoodBlock", 116},
+    {"TaikoDrum", 117}, {"MeloTom", 118}, {"SynDrum", 119}, {"RevCymbal", 120},
+    // Sound Effects
+    {"GtrFretNoise", 121}, {"BreathNoise", 122}, {"Seashore", 123}, {"BirdTweet", 124},
+    {"TelephoneRing", 125}, {"Helicopter", 126}, {"Applause", 127}, {"Gunshot", 128},
+  };
+  GEMSelect selectGeneralMidi(sizeof(optionByteGeneralMidi) / sizeof(SelectOptionByte), optionByteGeneralMidi);
+  GEMItem  menuItemGeneralMidi("GeneralMidi:", programChange,  selectGeneralMidi, sendProgramChange);
+
+
   // doing this long-hand because the STRUCT has problems accepting string conversions of numbers for some reason
   SelectOptionInt optionIntTransposeSteps[] = {
     {"-127",-127},{"-126",-126},{"-125",-125},{"-124",-124},{"-123",-123},{"-122",-122},{"-121",-121},{"-120",-120},{"-119",-119},{"-118",-118},{"-117",-117},{"-116",-116},{"-115",-115},{"-114",-114},{"-113",-113},
@@ -2259,7 +2456,7 @@
   GEMSelect selectAnimate( sizeof(optionByteAnimate)  / sizeof(SelectOptionByte), optionByteAnimate);
   GEMItem  menuItemAnimate( "Animation:", animationType, selectAnimate);
 
-  SelectOptionByte optionByteBright[] = { { "Dim", BRIGHT_DIM}, {"Low", BRIGHT_LOW}, {"Normal", BRIGHT_MID}, {"High", BRIGHT_HIGH}, {"THE SUN", BRIGHT_MAX } };
+  SelectOptionByte optionByteBright[] = { { "Off", BRIGHT_OFF}, {"Dimmer", BRIGHT_DIMMER}, {"Dim", BRIGHT_DIM}, {"Low", BRIGHT_LOW}, {"Normal", BRIGHT_MID}, {"High", BRIGHT_HIGH}, {"THE SUN", BRIGHT_MAX } };
   GEMSelect selectBright( sizeof(optionByteBright) / sizeof(SelectOptionByte), optionByteBright);
   GEMItem menuItemBright( "Brightness", globalBrightness, selectBright, setLEDcolorCodes);
 
@@ -2495,10 +2692,14 @@
     menuPageMain.addMenuItem(menuGotoSynth);
       menuPageSynth.addMenuItem(menuItemPlayback);  
       menuPageSynth.addMenuItem(menuItemWaveform);
+      // menuItemAudioD added here for hardware V1.2
+      menuPageSynth.addMenuItem(menuItemRolandMT32);
+      menuPageSynth.addMenuItem(menuItemGeneralMidi);
       menuPageSynth.addMenuItem(menuSynthBack);
     menuPageMain.addMenuItem(menuItemTransposeSteps);
     menuPageMain.addMenuItem(menuGotoTesting);
       menuPageTesting.addMenuItem(menuItemVersion);
+      menuPageTesting.addMenuItem(menuItemHardware);
       menuPageTesting.addMenuItem(menuItemPercep);
       menuPageTesting.addMenuItem(menuItemShiftColor);
       menuPageTesting.addMenuItem(menuItemWheelAlt);
@@ -2535,8 +2736,10 @@
     the rotary knob and physical hex buttons.
 
     Documentation:
-      Rotary knob code:
+      Rotary knob code derived from:
         https://github.com/buxtronix/arduino/tree/master/libraries/Rotary
+    Copyright 2011 Ben Buxton. Licenced under the GNU GPL Version 3.
+    Contact: bb@cactii.net
 
     when the mechanical rotary knob is turned,
     the two pins go through a set sequence of
@@ -2582,15 +2785,15 @@
         delayMicroseconds(6);                  // delay while column pin mode
         bool didYouPressHex = (digitalRead(p) == LOW);  // hex is pressed if it returns LOW. else not pressed
         h[i].interpBtnPress(didYouPressHex);
-        if (h[i].btnState == 1) {
+        if (h[i].btnState == BTN_STATE_NEWPRESS) {
           h[i].timePressed = runTime;          // log the time
         }
         pinMode(p, INPUT);                     // Set the selected column pin back to INPUT mode (0V / LOW).
        }
     }
-    for (byte i = 0; i < LED_COUNT; i++) {   // For all buttons in the deck
+    for (byte i = 0; i < BTN_COUNT; i++) {   // For all buttons in the deck
       switch (h[i].btnState) {
-        case 1: // just pressed
+        case BTN_STATE_NEWPRESS: // just pressed
           if (h[i].isCmd) {
             cmdOn(i);
           } else if (h[i].inScale || (!scaleLock)) {
@@ -2598,7 +2801,7 @@
             trySynthNoteOn(i);
           }
           break;
-        case 2: // just released
+        case BTN_STATE_RELEASED: // just released
           if (h[i].isCmd) {
             cmdOff(i);
           } else if (h[i].inScale || (!scaleLock)) {
@@ -2606,7 +2809,7 @@
             trySynthNoteOff(i); 
           }
           break;
-        case 3: // held
+        case BTN_STATE_HELD: // held
           break;
         default: // inactive
           break;
@@ -2663,6 +2866,15 @@
     }
   }
 
+  void setupHardware() {
+    if (Hardware_Version == HARDWARE_V1_2) {
+        midiD = MIDID_USB | MIDID_SER;
+        audioD = AUDIO_PIEZO | AUDIO_AJACK;
+        menuPageSynth.addMenuItem(menuItemAudioD, 2);
+        globalBrightness = BRIGHT_DIM;
+    }
+  }
+
 // @mainLoop
   /*
     An Arduino program runs
@@ -2712,7 +2924,8 @@
     dealWithRotary();  // deal with menu
   }
   void setup1() {  // set up on second core
-    setupSynth();
+    setupSynth(PIEZO_PIN, PIEZO_SLICE);
+    setupSynth(AJACK_PIN, AJACK_SLICE);
   }
   void loop1() {  // run on second core
     readKnob();
