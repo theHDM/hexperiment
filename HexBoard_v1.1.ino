@@ -2165,9 +2165,18 @@
     values to set the width of various components
     of the menu display, as below.
   */
-  #define MENU_ITEM_HEIGHT 10
-  #define MENU_PAGE_SCREEN_TOP_OFFSET 10
+  #define MENU_ITEM_HEIGHT 10     
+    // standard font bounding box is 6 wide x 12 tall, looks fine cropped to 10 pixels
+  #define MENU_PAGE_SCREEN_TOP_OFFSET 9
+    // actually the pixel # of row one, so title height is this value minus one
   #define MENU_VALUES_LEFT_OFFSET 78
+    // actually the pixel # of menu option left edge.
+    // and the first 5 pixel margin on the left of screen is included.
+    // menu label width is this value minus six.
+    // at 6 pixels wide per character, menu label can be 12 characters
+    // the last 8 pixels margin on the right are held for the scroll bar and menu arrow
+    // total pixels left for menu options = (120 - MENUVALUESLEFT).
+    // total characters for menu options is = 19 - MENUVALUESLEFT / 6.
   #define CONTRAST_AWAKE 63
   #define CONTRAST_SCREENSAVER 1
   // Create an instance of the U8g2 graphics library.
@@ -2930,3 +2939,21 @@
   void loop1() {  // run on second core
     readKnob();
   }
+// @extra
+  /*
+
+void buttonAction() {
+  // Declaration of context functions
+  menu.context.loop = buttonContextLoop;
+  menu.context.enter = buttonContextEnter; // Optional
+  menu.context.exit = buttonContextExit; // Optional
+  // Call of context functions
+  menu.context.enter();
+  //menu.context.allowExit = false; // Set to false if required to manually exit the context loop from within the loop itself (default is true)
+}
+
+void buttonContextLoop() {
+
+    menu.context.exit();
+}
+  */
