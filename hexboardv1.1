@@ -1,0 +1,477 @@
+// @readme
+  /*
+    HexBoard
+    Copyright 2022-2023 Jared DeCook and Zach DeCook
+    with help from Nicholas Fox
+    Licensed under the GNU GPL Version 3.
+
+    Hardware information:
+      Generic RP2040 running at 133MHz with 16MB of flash
+        https://github.com/earlephilhower/arduino-pico
+      Additional board manager URL:
+        https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+      Tools > USB Stack > (Adafruit TinyUSB)
+      Sketch > Export Compiled Binary
+
+    Compilation instructions:
+      Using arduino-cli...
+        # Download the board index
+        arduino-cli --additional-urls=https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json core update-index
+        # Install the core for rp2040
+        arduino-cli --additional-urls=https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json core download rp2040:rp2040
+        arduino-cli --additional-urls=https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json core install rp2040:rp2040
+        # Install libraries
+        arduino-cli lib install "MIDI library"
+        arduino-cli lib install "Adafruit NeoPixel"
+        arduino-cli lib install "U8g2" # dependency for GEM
+        arduino-cli lib install "Adafruit GFX Library" # dependency for GEM
+        arduino-cli lib install "GEM"
+        sed -i 's@#include "config/enable-glcd.h"@//\0@g' ~/Arduino/libraries/GEM/src/config.h # remove dependency from GEM
+        # Run Make to build the firmware
+        make
+    ---------------------------
+    New to programming Arduino?
+    ---------------------------
+    Coding the Hexboard is, basically, done in C++.
+    
+    When the HexBoard is plugged in, it runs
+    void setup() and void setup1(), then
+    runs void loop() and void loop1() on an
+    infinite loop until the HexBoard powers down.
+    There are two cores running independently.
+    You can pretend that the compiler tosses
+    these two routines inside an int main() for
+    each processor.
+  
+    To #include libraries, the Arduino
+    compiler expects them to be installed from
+    a centralized repository. You can also bring
+    your own .h / .cpp code but it must be saved
+    in "/src/____/___.h" to be valid.
+
+    We found this really annoying so to the
+    extent possible we have consolidated
+    this code into one single .ino sketch file.
+    However, the code is sectioned into something
+    like a library format for each feature
+    of the HexBoard, so that if the code becomes
+    too long to manage in a single file in the
+    future, it is easier to air-lift parts of
+    the code into a library at that point.
+  */
+// @init
+  #include <Arduino.h>            // this is necessary to talk to the Hexboard!
+  #include <Wire.h>               // this is necessary to deal with the pins and wires
+  #define SDAPIN 16
+  #define SCLPIN 17
+  #include <GEM_u8g2.h>           // library of code to create menu objects on the B&W display
+  #include <numeric>              // need that GCD function, son
+  #include <string>               // standard C++ library string classes (use "std::string" to invoke it); these do not cause the memory corruption that Arduino::String does.
+  #include <queue>                // standard C++ library construction to store open channels in microtonal mode (use "std::queue" to invoke it)
+// Software-detected hardware revision
+  #define HARDWARE_UNKNOWN 0
+  #define HARDWARE_V1_1 1
+  #define HARDWARE_V1_2 2
+  byte Hardware_Version = 0;       // 0 = unknown, 1 = v1.1 board. 2 = v1.2 board.
+// @helpers
+  /*
+    C++ returns a negative value for 
+    negative N % D. This function
+    guarantees the mod value is always
+    positive.
+  */
+  int positiveMod(int n, int d) {
+    return (((n % d) + d) % d);
+  }
+  /*
+    There may already exist linear interpolation
+    functions in the standard library. This one is helpful
+    because it will do the weighting division for you.
+    It only works on byte values since it's intended
+    to blend color values together. A better C++
+    coder may be able to allow automatic type casting here.
+  */
+  byte byteLerp(byte xOne, byte xTwo, float yOne, float yTwo, float y) {
+    float weight = (y - yOne) / (yTwo - yOne);
+    int temp = xOne + ((xTwo - xOne) * weight);
+    if (temp < xOne) {temp = xOne;}
+    if (temp > xTwo) {temp = xTwo;}
+    return temp;
+  }
+
+// @defaults
+  /*
+    This section sets default values
+    for user-editable options
+  */
+  int transposeSteps = 0;
+  byte scaleLock = 0;
+  byte perceptual = 1;
+  byte paletteBeginsAtKeyCenter = 1;
+  byte animationFPS = 32;             // actually frames per 2^20 microseconds. close enough to 30fps
+
+  byte wheelMode = 0;                 // standard vs. fine tune mode
+  byte modSticky = 0;
+  byte pbSticky = 0;
+  byte velSticky = 1;
+  int modWheelSpeed = 8;
+  int pbWheelSpeed = 1024;
+  int velWheelSpeed = 8;
+
+  #define SYNTH_OFF 0
+  #define SYNTH_MONO 1
+  #define SYNTH_ARPEGGIO 2
+  #define SYNTH_POLY 3
+  byte playbackMode = SYNTH_OFF;
+
+  #define WAVEFORM_SINE 0
+  #define WAVEFORM_STRINGS 1
+  #define WAVEFORM_CLARINET 2
+  #define WAVEFORM_HYBRID 7
+  #define WAVEFORM_SQUARE 8
+  #define WAVEFORM_SAW 9
+  #define WAVEFORM_TRIANGLE 10 
+  byte currWave = WAVEFORM_HYBRID;
+
+  #define RAINBOW_MODE 0
+  #define TIERED_COLOR_MODE 1
+  #define ALTERNATE_COLOR_MODE 2
+  byte colorMode = RAINBOW_MODE;
+
+  #define ANIMATE_NONE 0
+  #define ANIMATE_STAR 1 
+  #define ANIMATE_SPLASH 2 
+  #define ANIMATE_ORBIT 3 
+  #define ANIMATE_OCTAVE 4 
+  #define ANIMATE_BY_NOTE 5
+  byte animationType = ANIMATE_NONE;
+  
+  #define BRIGHT_MAX 255
+  #define BRIGHT_HIGH 210
+  #define BRIGHT_MID 180
+  #define BRIGHT_LOW 150
+  #define BRIGHT_DIM 110
+  #define BRIGHT_DIMMER 50
+  #define BRIGHT_OFF 0
+  byte globalBrightness = BRIGHT_MID;
+
+// @microtonal
+  /*
+    Most users will stick to playing in standard Western
+    tuning, but for those looking to play microtonally,
+    the Hexboard accommodates equal step tuning systems
+    of any arbitrary size.
+  */
+  /*
+    Each tuning system needs to be
+    pre-defined, pre-counted, and enumerated as below.
+    Future editions of this sketch may enable free
+    definition and smart pointer references to tuning
+    presets without requiring an enumeration.
+  */
+  #define TUNINGCOUNT 13
+  #define TUNING_12EDO 0
+  #define TUNING_17EDO 1
+  #define TUNING_19EDO 2
+  #define TUNING_22EDO 3
+  #define TUNING_24EDO 4
+  #define TUNING_31EDO 5
+  #define TUNING_41EDO 6
+  #define TUNING_53EDO 7
+  #define TUNING_72EDO 8
+  #define TUNING_BP 9
+  #define TUNING_ALPHA 10
+  #define TUNING_BETA 11
+  #define TUNING_GAMMA 12     
+  /*
+    Note names and palette arrays are allocated in memory
+    at runtime. Their usable size is based on the number
+    of steps (in standard tuning, semitones) in a tuning 
+    system before a new period is reached (in standard
+    tuning, the octave). This value provides a maximum
+    array size that handles almost all useful tunings
+    without wasting much space.
+  */
+  #define MAX_SCALE_DIVISIONS 72
+  /*
+    A dictionary of musical scales is defined in the code.
+    A scale is tied to one tuning system, with the exception
+    of "no scale" (i.e. every note is part of the scale).
+    "No scale" is tied to this value "ALL_TUNINGS" so it can
+    always be chosen in the menu.
+  */
+  #define ALL_TUNINGS 255
+  /*
+    MIDI notes are enumerated 0-127 (7 bits).
+    Values of 128-255 can be used to indicate
+    command instructions for non-note buttons.
+    These definitions support this function.
+  */
+  #define CMDB 192
+  #define UNUSED_NOTE 255
+  /*
+    When sending smoothly-varying pitch bend
+    or modulation messages over MIDI, the
+    code uses a cool-down period of about
+    1/30 of a second in between messages, enough
+    for changes to sound continuous without
+    overloading the MIDI message queue.
+  */
+  #define CC_MSG_COOLDOWN_MICROSECONDS 32768
+  /*
+    This class provides the seed values
+    needed to map buttons to note frequencies
+    and palette colors, and to populate
+    the menu with correct key names and
+    scale choices, for a given equal step
+    tuning system.
+  */
+  class tuningDef {
+  public:
+    std::string name;         // limit is 17 characters for GEM menu
+    byte cycleLength;         // steps before period/cycle/octave repeats
+    float stepSize;           // in cents, 100 = "normal" semitone.
+    SelectOptionInt keyChoices[MAX_SCALE_DIVISIONS];
+    int spanCtoA() {
+      return keyChoices[0].val_int;
+    }
+  };
+  /*
+    Note that for all practical musical purposes,
+    expressing step sizes to six significant figures is
+    sufficient to eliminate any detectable tuning artifacts
+    due to rounding.
+   
+    The note names are formatted in an array specifically to
+    match the format needed for the GEM Menu to accept directly
+    as a spinner selection item. The number next to the note name
+    is the number of steps from the anchor note A that key is.
+   
+    There are other ways the tuning could be calculated.
+    Some microtonal players choose an anchor note
+    other than A 440. Future versions will allow for
+    more flexibility in anchor selection, which will also
+    change the implementation of key options.
+  */ 
+  tuningDef tuningOptions[] = {
+    { "12 EDO", 12, 100.000, 
+      {{"C" ,-9},{"C#",-8},{"D" ,-7},{"Eb",-6},{"E" ,-5},{"F",-4}
+      ,{"F#",-3},{"G" ,-2},{"G#",-1},{"A" , 0},{"Bb", 1},{"B", 2}
+    }},
+    { "17 EDO", 17, 70.5882, 
+      {{"C",-13},{"Db",-12},{"C#",-11},{"D",-10},{"Eb",-9},{"D#",-8}
+      ,{"E", -7},{"F" , -6},{"Gb", -5},{"F#",-4},{"G", -3},{"Ab",-2}
+      ,{"G#",-1},{"A" ,  0},{"Bb",  1},{"A#", 2},{"B",  3}
+    }},
+    { "19 EDO", 19, 63.1579, 
+      {{"C" ,-14},{"C#",-13},{"Db",-12},{"D",-11},{"D#",-10},{"Eb",-9},{"E",-8}
+      ,{"E#", -7},{"F" , -6},{"F#", -5},{"Gb",-4},{"G",  -3},{"G#",-2}
+      ,{"Ab", -1},{"A" ,  0},{"A#",  1},{"Bb", 2},{"B",   3},{"Cb", 4}
+    }},  
+    { "22 EDO", 22, 54.5455, 
+      {{" C", -17},{"^C",-16},{"vC#",-15},{"vD",-14},{" D",-13},{"^D",-12}
+      ,{"^Eb",-11},{"vE",-10},{" E",  -9},{" F", -8},{"^F", -7},{"vF#",-6}
+      ,{"vG",  -5},{" G", -4},{"^G",  -3},{"vG#",-2},{"vA", -1},{" A",  0}
+      ,{"^A",   1},{"^Bb", 2},{"vB",   3},{" B",  4}
+    }},
+    { "24 EDO", 24, 50.0000, 
+      {{"C", -18},{"C+",-17},{"C#",-16},{"Dd",-15},{"D",-14},{"D+",-13}
+      ,{"Eb",-12},{"Ed",-11},{"E", -10},{"E+", -9},{"F", -8},{"F+", -7}
+      ,{"F#", -6},{"Gd", -5},{"G",  -4},{"G+", -3},{"G#",-2},{"Ad", -1}
+      ,{"A",   0},{"A+",  1},{"Bb",  2},{"Bd",  3},{"B",  4},{"Cd",  5}
+    }},
+    { "31 EDO", 31, 38.7097, 
+      {{"C",-23},{"C+",-22},{"C#",-21},{"Db",-20},{"Dd",-19}
+      ,{"D",-18},{"D+",-17},{"D#",-16},{"Eb",-15},{"Ed",-14}
+      ,{"E",-13},{"E+",-12}                      ,{"Fd",-11}
+      ,{"F",-10},{"F+", -9},{"F#", -8},{"Gb", -7},{"Gd", -6}
+      ,{"G", -5},{"G+", -4},{"G#", -3},{"Ab", -2},{"Ad", -1}
+      ,{"A",  0},{"A+",  1},{"A#",  2},{"Bb",  3},{"Bd",  4}
+      ,{"B",  5},{"B+",  6}                      ,{"Cd",  7}
+    }},
+    { "41 EDO", 41, 29.2683, 
+      {{" C",-31},{"^C",-30},{" C+",-29},{" Db",-28},{" C#",-27},{" Dd",-26},{"vD",-24}
+      ,{" D",-24},{"^D",-23},{" D+",-22},{" Eb",-21},{" D#",-20},{" Ed",-19},{"vE",-18}
+      ,{" E",-17},{"^E",-16}                                                ,{"vF",-15}
+      ,{" F",-14},{"^F",-13},{" F+",-12},{" Gb",-11},{" F#",-10},{" Gd", -9},{"vG", -8}
+      ,{" G", -7},{"^G", -6},{" G+", -5},{" Ab", -4},{" G#", -3},{" Ad", -2},{"vA", -1}
+      ,{" A",  0},{"^A",  1},{" A+",  2},{" Bb",  3},{" A#",  4},{" Bd",  5},{"vB",  6}
+      ,{" B",  7},{"^B",  8}                                                ,{"vC",  9}
+    }},
+    { "53 EDO", 53, 22.6415, 
+      {{" C", -40},{"^C", -39},{">C",-38},{"vDb",-37},{"Db",-36}
+      ,{" C#",-35},{"^C#",-34},{"<D",-33},{"vD", -32}
+      ,{" D", -31},{"^D", -30},{">D",-29},{"vEb",-28},{"Eb",-27}
+      ,{" D#",-26},{"^D#",-25},{"<E",-24},{"vE", -23}
+      ,{" E", -22},{"^E", -21},{">E",-20},{"vF", -19}
+      ,{" F", -18},{"^F", -17},{">F",-16},{"vGb",-15},{"Gb",-14}
+      ,{" F#",-13},{"^F#",-12},{"<G",-11},{"vG", -10}
+      ,{" G",  -9},{"^G",  -8},{">G", -7},{"vAb", -6},{"Ab", -5}
+      ,{" G#", -4},{"^G#", -3},{"<A", -2},{"vA",  -1}
+      ,{" A",   0},{"^A",   1},{">A",  2},{"vBb",  3},{"Bb",  4}
+      ,{" A#",  5},{"^A#",  6},{"<B",  7},{"vB",   8}
+      ,{" B",   9},{"^B",  10},{"<C", 11},{"vC",  12}
+    }},
+    { "72 EDO", 72, 16.6667, 
+      {{" C", -54},{"^C", -53},{">C", -52},{" C+",-51},{"<C#",-50},{"vC#",-49}
+      ,{" C#",-48},{"^C#",-47},{">C#",-46},{" Dd",-45},{"<D" ,-44},{"vD" ,-43}
+      ,{" D", -42},{"^D", -41},{">D", -40},{" D+",-39},{"<Eb",-38},{"vEb",-37}
+      ,{" Eb",-36},{"^Eb",-35},{">Eb",-34},{" Ed",-33},{"<E" ,-32},{"vE" ,-31}
+      ,{" E", -30},{"^E", -29},{">E", -28},{" E+",-27},{"<F" ,-26},{"vF" ,-25}
+      ,{" F", -24},{"^F", -23},{">F", -22},{" F+",-21},{"<F#",-20},{"vF#",-19}
+      ,{" F#",-18},{"^F#",-17},{">F#",-16},{" Gd",-15},{"<G" ,-14},{"vG" ,-13}
+      ,{" G", -12},{"^G", -11},{">G", -10},{" G+", -9},{"<G#", -8},{"vG#", -7}
+      ,{" G#", -6},{"^G#", -5},{">G#", -4},{" Ad", -3},{"<A" , -2},{"vA" , -1}
+      ,{" A",   0},{"^A",   1},{">A",   2},{" A+",  3},{"<Bb",  4},{"vBb",  5}
+      ,{" Bb",  6},{"^Bb",  7},{">Bb",  8},{" Bd",  9},{"<B" , 10},{"vB" , 11}
+      ,{" B",  12},{"^B",  13},{">B",  14},{" Cd", 15},{"<C" , 16},{"vC" , 17}
+    }},
+    { "Bohlen-Pierce", 13, 146.304, 
+      {{"C",-10},{"Db",-9},{"D",-8},{"E",-7},{"F",-6},{"Gb",-5}
+      ,{"G",-4},{"H",-3},{"Jb",-2},{"J",-1},{"A",0},{"Bb",1},{"B",2}
+    }},
+    { "Carlos Alpha", 9, 77.9650, 
+      {{"I",0},{"I#",1},{"II-",2},{"II+",3},{"III",4}
+      ,{"III#",5},{"IV-",6},{"IV+",7},{"Ib",8}
+    }},
+    { "Carlos Beta", 11, 63.8329,
+      {{"I",0},{"I#",1},{"IIb",2},{"II",3},{"II#",4},{"III",5}
+      ,{"III#",6},{"IVb",7},{"IV",8},{"IV#",9},{"Ib",10}
+    }},
+    { "Carlos Gamma", 20, 35.0985,
+      {{" I",  0},{"^I",  1},{" IIb", 2},{"^IIb", 3},{" I#",   4},{"^I#",   5}
+      ,{" II", 6},{"^II", 7}
+      ,{" III",8},{"^III",9},{" IVb",10},{"^IVb",11},{" III#",12},{"^III#",13}
+      ,{" IV",14},{"^IV",15},{" Ib", 16},{"^Ib", 17},{" IV#", 18},{"^IV#", 19}
+    }},
+  };
+
+// @layout
+  /*
+    This section defines the different
+    preset note layout options.
+  */  
+  /*
+    This class provides the seed values
+    needed to implement a given isomorphic
+    note layout. From it, the map of buttons
+    to note frequencies can be calculated.
+   
+    A layout is tied to a specific tuning.
+  */
+  class layoutDef {
+  public:
+    std::string name;    // limit is 17 characters for GEM menu
+    bool isPortrait;     // affects orientation of the GEM menu only.
+    byte hexMiddleC;     // instead of "what note is button 1", "what button is the middle"
+    int8_t acrossSteps;  // defined this way to be compatible with original v1.1 firmare
+    int8_t dnLeftSteps;  // defined this way to be compatible with original v1.1 firmare
+    byte tuning;         // index of the tuning that this layout is designed for
+  };
+  /*
+    Isomorphic layouts are defined by
+    establishing where the center of the
+    layout is, and then the number of tuning
+    steps to go up or down for the hex button
+    across or down diagonally.
+  */
+  layoutDef layoutOptions[] = {
+    { "Wicki-Hayden",      1, 64,   2,  -7, TUNING_12EDO },
+    { "Harmonic Table",    0, 75,  -7,   3, TUNING_12EDO },
+    { "Janko",             0, 65,  -1,  -1, TUNING_12EDO },
+    { "Gerhard",           0, 65,  -1,  -3, TUNING_12EDO },
+    { "Accordion C-sys.",  1, 75,   2,  -3, TUNING_12EDO },
+    { "Accordion B-sys.",  1, 64,   1,  -3, TUNING_12EDO },
+
+    { "Full Gamut",        1, 65,   1,  -9, TUNING_17EDO },
+    { "Bosanquet-Wilson",  0, 65,  -2,  -1, TUNING_17EDO },
+    { "Neutral Thirds A",  0, 65,  -1,  -2, TUNING_17EDO },
+    { "Neutral Thirds B",  0, 65,   1,  -3, TUNING_17EDO },
+
+    { "Full Gamut",        1, 65,   1,  -9, TUNING_19EDO },
+    { "Bosanquet-Wilson",  0, 65,  -1,  -2, TUNING_19EDO },
+    { "Kleismic",          0, 65,  -1,  -4, TUNING_19EDO },
+    
+    { "Full Gamut",        1, 65,   1,  -8, TUNING_22EDO },
+    { "Bosanquet-Wilson",  0, 65,  -3,  -1, TUNING_22EDO },
+    { "Porcupine",         0, 65,   1,  -4, TUNING_22EDO },
+    
+    { "Full Gamut",        1, 65,   1,  -9, TUNING_24EDO },
+    { "Bosanquet-Wilson",  0, 65,  -1,  -3, TUNING_24EDO },
+    { "Inverted",          0, 65,   1,  -4, TUNING_24EDO },
+    
+    { "Full Gamut",        1, 65,   1,  -7, TUNING_31EDO },
+    { "Bosanquet-Wilson",  0, 65,  -2,  -3, TUNING_31EDO },
+    { "Double Bosanquet",  0, 65,  -1,  -4, TUNING_31EDO },
+    { "Anti-Double Bos.",  0, 65,   1,  -5, TUNING_31EDO },
+    
+    { "Full Gamut",        0, 65,   1,  -8, TUNING_41EDO },  // forty-one #3
+    { "Bosanquet-Wilson",  0, 65,  -4,  -3, TUNING_41EDO },  // forty-one #1
+    { "Gerhard",           0, 65,   3, -10, TUNING_41EDO },  // forty-one #2
+    { "Baldy",             0, 65,  -1,  -6, TUNING_41EDO },  
+    { "Rodan",             1, 65,  -1,  -7, TUNING_41EDO },  
+    
+    { "Wicki-Hayden",      1, 64,   9, -31, TUNING_53EDO },
+    { "Bosanquet-Wilson",  0, 65,  -5,  -4, TUNING_53EDO },
+    { "Kleismic A",        0, 65,  -8,  -3, TUNING_53EDO },
+    { "Kleismic B",        0, 65,  -5,  -3, TUNING_53EDO },
+    { "Harmonic Table",    0, 75, -31,  14, TUNING_53EDO },
+    { "Buzzard",           0, 65,  -9,  -1, TUNING_53EDO },
+    
+    { "Full Gamut",        1, 65,   1,  -9, TUNING_72EDO },
+    { "Expanded Janko",    0, 65,  -1,  -6, TUNING_72EDO },
+    
+    { "Full Gamut",        1, 65,   1,  -9, TUNING_BP },
+    { "Standard",          0, 65,  -2,  -1, TUNING_BP },
+    
+    { "Full Gamut",        1, 65,   1,  -9, TUNING_ALPHA },
+    { "Compressed",        0, 65,  -2,  -1, TUNING_ALPHA },
+    
+    { "Full Gamut",        1, 65,   1,  -9, TUNING_BETA },
+    { "Compressed",        0, 65,  -2,  -1, TUNING_BETA },
+    
+    { "Full Gamut",        1, 65,   1,  -9, TUNING_GAMMA },
+    { "Compressed",        0, 65,  -2,  -1, TUNING_GAMMA }    
+  };
+  const byte layoutCount = sizeof(layoutOptions) / sizeof(layoutDef);
+// @scales
+  /*
+    This class defines a scale pattern
+    for a given tuning. It is basically
+    an array with the number of steps in
+    between each degree of the scale. For
+    example, the major scale in 12EDO
+    is 2, 2, 1, 2, 2, 2, 1.
+   
+    A scale is tied to a specific tuning.
+  */
+  class scaleDef {
+  public:
+    std::string name;
+    byte tuning;
+    byte pattern[MAX_SCALE_DIVISIONS];
+  };
+  scaleDef scaleOptions[] = {
+    { "None",              ALL_TUNINGS,      { 0 } },
+    // 12 EDO
+    { "Major",             TUNING_12EDO,     { 2,2,1,2,2,2,1 } },
+    { "Minor, natural",    TUNING_12EDO,     { 2,1,2,2,1,2,2 } },
+    { "Minor, melodic",    TUNING_12EDO,     { 2,1,2,2,2,2,1 } },
+    { "Minor, harmonic",   TUNING_12EDO,     { 2,1,2,2,1,3,1 } },
+    { "Pentatonic, major", TUNING_12EDO,     { 2,2,3,2,3 } },
+    { "Pentatonic, minor", TUNING_12EDO,     { 3,2,2,3,2 } },
+    { "Blues",             TUNING_12EDO,     { 3,1,1,1,1,3,2 } },
+    { "Double Harmonic",   TUNING_12EDO,     { 1,3,1,2,1,3,1 } },
+    { "Phrygian",          TUNING_12EDO,     { 1,2,2,2,1,2,2 } },
+    { "Phrygian Dominant", TUNING_12EDO,     { 1,3,1,2,1,2,2 } },
+    { "Dorian",            TUNING_12EDO,     { 2,1,2,2,2,1,2 } },
+    { "Lydian",            TUNING_12EDO,     { 2,2,2,1,2,2,1 } },
+    { "Lydian Dominant",   TUNING_12EDO,     { 2,2,2,1,2,1,2 } },
+    { "Mixolydian",        TUNING_12EDO,     { 2,2,1,2,2,1,2 } },
+    { "Locrian",           TUNING_12EDO,     { 1,2,2,1,2,2,2 } },
+    { "Whole tone",        TUNING_12EDO,     { 2,2,2,2,2,2 } },
+    { "Octatonic",         TUNING_12EDO,     { 2,1,2,1,2,1,2,1 } },
+    // 17 EDO; for more: https://en.xen.wiki/w/17edo#Scales
+    { "Diatonic",          TUNING_17EDO,  { 3,3,1,3,3,3,1 } },
+    { "Pentatonic",        TUNING_17EDO,  { 3,3,4,3,4 } },
+    { "Har
