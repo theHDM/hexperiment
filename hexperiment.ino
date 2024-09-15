@@ -63,14 +63,20 @@
   #include <Arduino.h>            // this is necessary to talk to the Hexboard!
   #include <Wire.h>               // this is necessary to deal with the pins and wires
   #include <GEM_u8g2.h>           // library of code to create menu objects on the B&W display
+
+  #include "src/constants.h"
+  #include "src/helpers.h"
+  #include "src/hexCoordinates.h"
+
+  #include "src/button.h"
+  #include "src/rotaryKnob.h"
+  #include "src/softTimer.h"     // library of code to access the processor's clock functions
+  #include "src/microtonal.h"
+
   #include <numeric>              // need that GCD function, son
   #include <string>               // standard C++ library string classes (use "std::string" to invoke it); these do not cause the memory corruption that Arduino::String does.
   #include <queue>                // standard C++ library construction to store open channels in microtonal mode (use "std::queue" to invoke it)
-  #include "src/rotaryKnob.h"
-  #include "src/softTimer.h"     // library of code to access the processor's clock functions
-  #include "src/constants.h"
-  #include "src/helpers.h"
-  #include "src/microtonal.h"
+
 
 // @defaults
   /*
@@ -147,18 +153,12 @@
 // @gridSystem
   /*
     This section of the code handles the hex grid
-       Hexagonal coordinates
-         https://www.redblobgames.com/grids/hexagons/
-         http://ondras.github.io/rot.js/manual/#hex/indexing
     The HexBoard contains a grid of 140 buttons with
     hexagonal keycaps. The processor has 10 pins connected
     to a multiplexing unit, which hotswaps between the 14 rows
     of ten buttons to allow all 140 inputs to be read in one
     program read cycle.
   */
-
-
-
   /*
     This class defines the hexagon button
     as an object. It stores all real-time
@@ -1134,23 +1134,6 @@
     LED animation responsive to key
     presses
   */
-  /*
-    The coordinate system used to locate hex buttons
-    a certain distance and direction away relies on
-    a preset array of coordinate offsets corresponding
-    to each of the six linear directions on the hex grid.
-    These cardinal directions are enumerated to make
-    the code more legible for humans.
-  */
-  #define HEX_DIRECTION_EAST 0
-  #define HEX_DIRECTION_NE   1
-  #define HEX_DIRECTION_NW   2
-  #define HEX_DIRECTION_WEST 3
-  #define HEX_DIRECTION_SW   4
-  #define HEX_DIRECTION_SE   5
-  // animation variables  E NE NW  W SW SE
-  int8_t vertical[] =   { 0,-1,-1, 0, 1, 1};
-  int8_t horizontal[] = { 2, 1,-1,-2,-1, 1};
 
   uint64_t animFrame(byte x) {     
     if (h[x].timePressed) {          // 2^20 microseconds is close enough to 1 second
